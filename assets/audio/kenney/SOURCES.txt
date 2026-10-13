@@ -1,0 +1,6 @@
+Kenney Interface Sounds, RPG Audio, and Impact Sounds are released under CC0 1.0 Universal.
+Interface Sounds: https://kenney.nl/assets/interface-sounds
+RPG Audio: https://kenney.nl/assets/rpg-audio
+Impact Sounds: https://kenney.nl/assets/impact-sounds
+
+Audio files are used with permission under CC0; attribution is not required.

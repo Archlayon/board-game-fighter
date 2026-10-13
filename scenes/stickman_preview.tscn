@@ -1,0 +1,37 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/stickman_preview.gd" id="1_preview"]
+[ext_resource type="PackedScene" path="res://assets/characters/stickman.glb" id="2_stickman"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_floor"]
+size = Vector2(10, 10)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
+albedo_color = Color(0.055, 0.075, 0.105, 1)
+roughness = 0.9
+
+[node name="StickmanPreview" type="Node3D"]
+script = ExtResource("1_preview")
+
+[node name="Stickman" parent="." instance=ExtResource("2_stickman")]
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.025, 0)
+mesh = SubResource("PlaneMesh_floor")
+surface_material_override/0 = SubResource("StandardMaterial3D_floor")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(0, 1.05, 4.2)
+rotation_degrees = Vector3(-5, 0, 0)
+current = true
+fov = 55.0
+
+[node name="KeyLight" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-38, -28, 0)
+light_energy = 1.8
+shadow_enabled = true
+
+[node name="FillLight" type="OmniLight3D" parent="."]
+position = Vector3(-2, 2.5, 2)
+light_energy = 0.8
+omni_range = 8.0

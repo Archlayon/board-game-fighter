@@ -1,0 +1,53 @@
+.godot/
+export.cfg
+export_presets.cfg
+
+# This is a separate upstream checkout; the game uses the copy in /addons.
+/godot-health-hitbox-hurtbox/
+/hitbox_example/
+
+# Android release credentials and generated builds
+*.keystore
+*.jks
+*.p12
+*.pem
+*.p8
+*.key
+*.mobileprovision
+*.apk
+*.aab
+*.aar
+android/.gradle/
+android/build/
+android/local.properties
+**/key.properties
+/build/
+/dist/
+/exports/
+
+# Local SDK configuration and private credentials
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+*.secret
+*.credentials
+
+# Editor, operating system, and temporary files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.tmp
+*.log
+*.backup
+*.blend1
+*.blend2
+
+# Local playtest captures and recordings
+/recordings/
+/captures/
+*.mp4
+*.mkv
+*.mov

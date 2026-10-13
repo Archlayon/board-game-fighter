@@ -1,0 +1,45 @@
+[gd_scene load_steps=6 format=3 uid="//fighter_complete"]
+
+[ext_resource type="Script" path="res://scripts/fighter_complete.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/animations/quaternius/UAL2/Universal Animation Library 2[Standard]/Unreal-Godot/UAL2_Standard.blend" id="2"]
+[ext_resource type="Script" path="res://scripts/fighter_combat.gd" id="3"]
+[ext_resource type="Script" path="res://scripts/fighter_animator.gd" id="4"]
+[ext_resource type="Script" path="res://scripts/move_data.gd" id="5"]
+[ext_resource type="PackedScene" path="res://scripts/test_hitbox.gd" id="6"]
+[ext_resource type="PackedScene" path="res://scripts/test_hurtbox.gd" id="7"]
+
+[node name="FighterComplete" type="Node3D"]
+script = ExtResource("1")
+
+[node name="Player" type="CharacterBody3D" parent="."]
+script = ExtResource("3")
+
+[node name="Player/Model" type="Node3D" parent="Player"]
+scene = ExtResource("2")
+
+[node name="Player/Combat" type="Node" parent="Player"]
+script = ExtResource("3")
+
+[node name="Player/Animator" type="Node" parent="Player"]
+script = ExtResource("4")
+
+[node name="Enemy" type="CharacterBody3D" parent="."]
+position = Vector3(3, 0, 0)
+rotation_degrees = Vector3(0, 180, 0)
+script = ExtResource("3")
+
+[node name="Enemy/Model" type="Node3D" parent="Enemy"]
+scene = ExtResource("2")
+
+[node name="Enemy/Combat" type="Node" parent="Enemy"]
+script = ExtResource("3")
+
+[node name="Enemy/Animator" type="Node" parent="Enemy"]
+script = ExtResource("4")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+position = Vector3(0, 2, 6)
+rotation_degrees = Vector3(0, 180, 0)
+
+[node name="Light3D" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-45, 45, 0)
