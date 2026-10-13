@@ -1,0 +1,59 @@
+name: Android Export
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export-android:
+    name: Export Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Godot
+        uses: firebelley/godot-export@v6.1.1
+        with:
+          godot_version: 4.7.2
+          templates: true
+
+      - name: Export Android Debug APK
+        run: |
+          mkdir -p exports
+          godot --headless --export-debug "Android Debug" exports/BoardGameFighter-debug.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoardGameFighter-debug
+          path: exports/BoardGameFighter-debug.apk
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Board Game Fighter - Build ${{ github.run_number }}"
+          body: |
+            Development build for testing.
+            
+            **Installation:**
+            1. Download `BoardGameFighter-debug.apk`
+            2. Enable "Install unknown apps" for your browser/file manager
+            3. Open the APK and install
+            
+            Package ID: `com.layon.boardgamefighter`
+            Version: ${{ github.run_number }}
+          files: exports/BoardGameFighter-debug.apk
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
