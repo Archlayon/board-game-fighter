@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Godot
-        uses: firebelley/godot-export@v6.1.1
+        uses: firebelley/godot-export@v6
         with:
           godot_version: 4.7.2
           templates: true
