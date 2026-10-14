@@ -27,6 +27,7 @@ package/unique_name="com.layon.boardgamefighter"
 package/name="Board Game Fighter"
 package/signed=true
 screen/immersive_mode=true
+screen/orientation="landscape"
 screen/support_small=true
 screen/support_normal=true
 screen/support_large=true
