@@ -33,8 +33,20 @@ jobs:
           mv ~/.local/share/godot/export_templates/4.7.2.stable/templates/* ~/.local/share/godot/export_templates/4.7.2.stable/
           rmdir ~/.local/share/godot/export_templates/4.7.2.stable/templates
 
+      - name: Setup debug keystore
+        if: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_DEBUG_KEYSTORE }}" | base64 -d > debug.keystore
+
       - name: Setup export preset
-        run: cp export_presets.cfg.example export_presets.cfg
+        run: |
+          cp export_presets.cfg.example export_presets.cfg
+          # Update version code to GitHub run number for auto-increment
+          sed -i "s/version\/code=1/version\/code=${{ github.run_number }}/" export_presets.cfg
+          # Use our consistent debug keystore
+          if [ -f debug.keystore ]; then
+            sed -i "s|package/signed=true|package/signed=true\npackage/debug_keystore=\"debug.keystore\"\npackage/debug_keystore_user=\"androiddebugkey\"\npackage/debug_keystore_pass=\"android\"\npackage/debug_key_pass=\"android\"|" export_presets.cfg
+          fi
 
       - name: Setup CI project config
         run: cp project.ci.godot project.godot
@@ -69,7 +81,7 @@ jobs:
             3. Open the APK and install
             
             Package ID: `com.layon.boardgamefighter`
-            Version: ${{ github.run_number }}
+            Version code: ${{ github.run_number }}
           files: exports/BoardGameFighter-debug.apk
           draft: false
           prerelease: true
