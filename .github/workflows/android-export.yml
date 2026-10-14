@@ -37,6 +37,15 @@ jobs:
         if: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
         run: |
           echo "${{ secrets.ANDROID_DEBUG_KEYSTORE }}" | base64 -d > debug.keystore
+          echo "Using custom debug keystore for consistent signing"
+        continue-on-error: true
+
+      - name: Fallback keystore warning
+        if: ${{ secrets.ANDROID_DEBUG_KEYSTORE == '' }}
+        run: |
+          echo "⚠️ ANDROID_DEBUG_KEYSTORE secret not set - using default debug keystore"
+          echo "   APKs will NOT be installable as updates without uninstalling first!"
+          echo "   Add ANDROID_DEBUG_KEYSTORE secret in GitHub repo settings to fix this."
 
       - name: Setup export preset
         run: |
