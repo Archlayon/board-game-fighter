@@ -5,7 +5,7 @@ const GamesHubScript = preload("res://scripts/games_hub.gd")
 const ComboLabScript = preload("res://scripts/combo_lab.gd")
 const StoryCampaignScript = preload("res://scripts/story_campaign.gd")
 const MainMenuScript = preload("res://scripts/main_menu.gd")
-const FIGHTER_SCENE: PackedScene = preload("res://assets/characters/stickman.glb")
+const FIGHTER_SCENE: PackedScene = preload("res://stickman.glb")
 # New combat system components
 const MoveDataScript = preload("res://scripts/move_data.gd")
 const FighterCombatScript = preload("res://scripts/fighter_combat.gd")
