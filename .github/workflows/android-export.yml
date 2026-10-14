@@ -18,12 +18,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Godot
-        uses: firebelley/godot-export@v8.0.0
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
         with:
-          godot_executable_download_url: https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
-          godot_export_templates_download_url: https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz
-          cache: true
+          api-level: 34
+          ndk-version: r27c
+          build-tools-version: 34.0.0
+
+      - name: Download Godot
+        run: |
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip
+          unzip -q Godot_v4.7.2-stable_linux.x86_64.zip
+          mv Godot_v4.7.2-stable_linux.x86_64 godot
+          chmod +x godot
+
+      - name: Download export templates
+        run: |
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_export_templates.tpz
+          mkdir -p ~/.local/share/godot/export_templates/4.7.2.stable
+          unzip -q Godot_v4.7.2-stable_export_templates.tpz -d ~/.local/share/godot/export_templates/4.7.2.stable
+          mv ~/.local/share/godot/export_templates/4.7.2.stable/templates/* ~/.local/share/godot/export_templates/4.7.2.stable/
+          rmdir ~/.local/share/godot/export_templates/4.7.2.stable/templates
 
       - name: Setup export preset
         run: cp export_presets.cfg.example export_presets.cfg
@@ -31,7 +46,7 @@ jobs:
       - name: Export Android Debug APK
         run: |
           mkdir -p exports
-          godot --headless --export-debug "Android Debug" exports/BoardGameFighter-debug.apk
+          ./godot --headless --export-debug "Android Debug" exports/BoardGameFighter-debug.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
