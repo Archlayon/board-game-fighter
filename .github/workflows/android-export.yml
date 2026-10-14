@@ -42,7 +42,12 @@ jobs:
       - name: Export Android Debug APK
         run: |
           mkdir -p exports
-          ./godot --headless --export-debug "Android Debug" exports/BoardGameFighter-debug.apk
+          ./godot --headless --export-debug "Android Debug" exports/BoardGameFighter-debug.apk || true
+
+      - name: Verify APK
+        run: |
+          ls -la exports/
+          test -f exports/BoardGameFighter-debug.apk && echo "APK created successfully" || (echo "APK not found" && exit 1)
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
