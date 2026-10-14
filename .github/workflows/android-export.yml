@@ -34,14 +34,15 @@ jobs:
           rmdir ~/.local/share/godot/export_templates/4.7.2.stable/templates
 
       - name: Setup debug keystore
-        if: ${{ secrets.ANDROID_DEBUG_KEYSTORE != '' }}
+        if: env.ANDROID_DEBUG_KEYSTORE != ''
+        env:
+          ANDROID_DEBUG_KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
         run: |
-          echo "${{ secrets.ANDROID_DEBUG_KEYSTORE }}" | base64 -d > debug.keystore
+          echo "$ANDROID_DEBUG_KEYSTORE" | base64 -d > debug.keystore
           echo "Using custom debug keystore for consistent signing"
-        continue-on-error: true
 
       - name: Fallback keystore warning
-        if: ${{ secrets.ANDROID_DEBUG_KEYSTORE == '' }}
+        if: env.ANDROID_DEBUG_KEYSTORE == ''
         run: |
           echo "⚠️ ANDROID_DEBUG_KEYSTORE secret not set - using default debug keystore"
           echo "   APKs will NOT be installable as updates without uninstalling first!"
