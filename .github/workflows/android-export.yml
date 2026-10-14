@@ -24,6 +24,9 @@ jobs:
           godot_version: 4.7.2
           templates: true
 
+      - name: Setup export preset
+        run: cp export_presets.cfg.example export_presets.cfg
+
       - name: Export Android Debug APK
         run: |
           mkdir -p exports
