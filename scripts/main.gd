@@ -290,6 +290,12 @@ var touch_flight_up := false
 var touch_flight_down := false
 var enemy_flight_decision_clock := 4.0
 var enemy_flight_time_left := 0.0
+
+# 🧠 HYBRID FSM + UTILITY AI BRAIN state
+enum AIState { IDLE, DASH, ATTACK, AIR_COMBO, BLOCK, STUN, RETREAT }
+var ai_state := AIState.IDLE
+var ai_state_timer := 0.0
+var ai_decision_timer := 0.0
 var games_button: Button
 var combo_lab_button: Button
 var story_button: Button
@@ -3513,7 +3519,7 @@ func _face_fighter(fighter: Node3D, target: Node3D, delta := 0.0) -> void:
 		fighter.global_basis = fighter.global_basis.orthonormalized().slerp(target_basis, turn_blend)
 
 func _update_ai(delta: float) -> void:
-	if not is_instance_valid(enemy_node) or challenge_active:
+	if not is_instance_valid(enemy_node) or challenge_active or match_over:
 		return
 	var player_is_flying := bool(player_node.get_meta("flying", false))
 	if bool(enemy_node.get_meta("flying", false)):
@@ -3555,6 +3561,8 @@ func _update_ai(delta: float) -> void:
 		return
 	if enemy_stun_lock > 0.0:
 		_set_locomotion(enemy_node, 0.0)
+		ai_state = AIState.STUN
+		ai_state_timer = 0.0
 		return
 	if grapple_victim == enemy_node or grapple_holder == enemy_node:
 		_set_locomotion(enemy_node, 0.0)
@@ -3565,159 +3573,173 @@ func _update_ai(delta: float) -> void:
 	if enemy_guard_timer > 0.0:
 		_set_locomotion(enemy_node, 0.0)
 		return
-	ai_clock -= delta
-	var difference := Vector2(player_node.position.x - enemy_node.position.x, player_node.position.z - enemy_node.position.z)
-	var distance := difference.length()
-	ai_defense_clock = maxf(0.0, ai_defense_clock - delta)
-	
-	# Anti-air: if player is airborne and in range, anti-air attack
-	var player_airborne := bool(player_node.get_meta("airborne", false)) or player_is_flying
-	var player_height := player_node.position.y
-	if player_airborne and player_height > 0.5 and distance < 2.5:
-		var profile := _ai_profile()
-		if rng.randf() < float(profile.antiair_chance):
-			_apply_move(false, {"name": "Anti-Air", "kind": "attack", "damage": 18, "stun": 16, "cost": 0, "animation": "kick", "aerial": true}, distance)
-			return
-	
-	# Whiff punish: if player just whiffed an attack and is in recovery
-	if player_recovery > 0.0 and distance < 2.0:
-		var profile := _ai_profile()
-		if rng.randf() < float(profile.whiff_punish_chance):
-			var punish_move := _ai_select_punish_move(distance)
+
+	# Update state machine timer
+	if ai_state_timer > 0.0:
+		ai_state_timer -= delta
+		if ai_state_timer <= 0.0:
+			ai_state = AIState.IDLE
+
+	# Utility AI decision loop - recalculates every reaction_cooldown
+	ai_decision_timer -= delta
+	if ai_decision_timer <= 0.0:
+		ai_decision_timer = float(_ai_profile().decision_interval)
+		_ai_make_decision()
+
+# 🧠 UTILITY AI SCORING (0.0-1.0 dynamic scores based on distance, frame advantage, health, player actions)
+func _ai_utility_score(action: String, dist: float, profile: Dictionary, player_airborne: bool, player_attacking: bool, player_recovering: bool, player_blocking: bool, low_health: bool) -> float:
+	var score := 0.0
+	var reaction := float(profile.reaction_time)
+
+	match action:
+		"FLASH_STEP":
+			# High utility if distance > 4m and AI health is high
+			if not low_health and dist > 4.0:
+				score = clamp((dist - 3.0) / 10.0, 0.0, 1.0)
+		"PUNISH":
+			# High utility if close and player recovering from whiff
+			if dist <= 2.5 and player_recovering:
+				score = 0.9
+		"AIR_LAUNCHER":
+			# Max utility if player airborne
+			if player_airborne and dist <= 3.0:
+				score = 1.0
+		"PERFECT_BLOCK":
+			# High utility if player attacking and close; apply human reaction delay
+			if player_attacking and dist <= 2.0:
+				score = 0.85
+				if reaction > 0.15:
+					score *= 0.6
+		"RETREAT":
+			# High utility if low health and player close
+			if low_health and dist < 2.5:
+				score = 0.8
+		"ULTIMATE":
+			# High utility if meter full and optimal distance
+			if enemy_mp >= 4.0:
+				score = 0.7 if dist > 3.0 else 0.4
+		"GROUND_COMBO":
+			# Standard close-range attack
+			if dist <= 2.2 and not player_attacking and not player_blocking:
+				score = 0.6
+		"CHARGE":
+			# Charge meter when far and low meter
+			if enemy_mp < 1.5 and dist > 1.65:
+				score = 0.3
+		"IDLE":
+			score = 0.1
+
+	return score
+
+# 🏁 FSM EXECUTOR - runs the chosen action and locks into the matching combat state
+func _ai_execute_action(action: String, dist: float, profile: Dictionary) -> void:
+	match action:
+		"FLASH_STEP":
+			var dir := (player_node.global_position - enemy_node.global_position)
+			dir.y = 0.0
+			if dir.length_squared() < 0.0001:
+				dir = -enemy_node.global_basis.z
+			else:
+				dir = dir.normalized()
+			_perform_dash(dir)
+			ai_state = AIState.DASH
+			ai_state_timer = DASH_DURATION
+		"PUNISH":
+			var punish_move := _ai_select_punish_move(dist)
 			if punish_move:
-				_apply_move(false, punish_move, distance)
-				return
-	
-	# Defensive: block or dodge incoming attacks
-	if _ai_should_block(distance):
-		var defense := _ai_profile()
-		var active_attack_state: Dictionary = player_node.get_meta("attack_state", {})
-		var active_attack_move: Dictionary = active_attack_state.get("move", {})
-		var can_dodge := enemy_vanish >= VANISH_DODGE_COST
-		if can_dodge and rng.randf() < float(defense.defense_dodge_rate) and distance < _attack_contact_range(active_attack_move) + 0.2:
-			_apply_move(false, {"name": "Dodge", "kind": "dodge", "cost": 0, "cue": "DODGE"}, distance)
-		else:
-			_apply_move(false, {"name": "Read and Guard", "kind": "block", "guard": 18, "cost": 0}, distance)
-			enemy_guard_timer = float(defense.block_duration)
-			enemy_recovery = maxf(enemy_recovery, float(defense.block_duration))
-			ai_defense_clock = float(defense.reaction_time)
-			_show_feedback("AI READ YOUR ATTACK · BLOCK")
+				_apply_move(false, punish_move, dist)
+				ai_state = AIState.ATTACK
+				ai_state_timer = 0.5
+		"AIR_LAUNCHER":
+			_apply_move(false, {"name": "Anti-Air", "kind": "attack", "damage": 18, "stun": 16, "cost": 0, "animation": "kick", "aerial": true}, dist)
+			ai_state = AIState.AIR_COMBO
+			ai_state_timer = 0.8
+		"PERFECT_BLOCK":
+			_apply_move(false, {"name": "Read and Guard", "kind": "block", "guard": 18, "cost": 0}, dist)
+			enemy_guard_timer = float(profile.block_duration)
+			enemy_recovery = maxf(enemy_recovery, float(profile.block_duration))
+			ai_state = AIState.BLOCK
+			ai_state_timer = float(profile.block_duration)
+		"RETREAT":
+			var away := (enemy_node.global_position - player_node.global_position)
+			away.y = 0.0
+			if away.length_squared() < 0.0001:
+				away = enemy_node.global_basis.z
+			else:
+				away = away.normalized()
+			_perform_dash(away)
+			ai_state = AIState.RETREAT
+			ai_state_timer = DASH_DURATION
+		"ULTIMATE":
+			var options := GameData.legends_arts(opponent_data.get("signature", ""), unlocked_ultimates, opponent_style)
+			var ultimates: Array[Dictionary] = []
+			for move in options:
+				if move.get("kind") == "ultimate" and not bool(move.get("locked", false)) and int(move.get("cost", 0)) <= int(enemy_mp):
+					ultimates.append(move)
+			if not ultimates.is_empty():
+				var ultimate_move := ultimates[rng.randi_range(0, ultimates.size() - 1)]
+				_apply_move(false, ultimate_move, dist)
+				ai_state = AIState.ATTACK
+				ai_state_timer = 1.0
+		"GROUND_COMBO":
+			var options := GameData.legends_arts(opponent_data.get("signature", ""), unlocked_ultimates, opponent_style)
+			var attacks: Array[Dictionary] = []
+			for move in options:
+				if move.get("locked", false) or move.get("kind") not in ["attack", "trap"] or int(move.get("cost", 0)) > int(enemy_mp):
+					continue
+				attacks.append(move)
+			if not attacks.is_empty():
+				var basic_move := attacks[rng.randi_range(0, attacks.size() - 1)]
+				_apply_move(false, basic_move, dist)
+				ai_state = AIState.ATTACK
+				ai_state_timer = 0.6
+		"CHARGE":
+			_apply_move(false, {"name": "Focus", "kind": "charge", "charge": 1.5, "cost": 0, "cue": "FOCUS"}, dist)
+			ai_state = AIState.IDLE
+			ai_state_timer = 0.8
+		"IDLE":
+			ai_state = AIState.IDLE
+			ai_state_timer = 0.3
+
+# 🎯 UTILITY AI DECISION - picks highest-scoring action every decision_interval
+func _ai_make_decision() -> void:
+	if not is_instance_valid(enemy_node) or not is_instance_valid(player_node):
 		return
-	
-	# Spacing/footsies: maintain optimal distance
-	var optimal_distance := 1.8
 	var profile := _ai_profile()
-	if distance > optimal_distance + 0.5:
-		var chase_speed := PLAYER_SPEED * float(profile.chase_speed) if not training_mode else 2.0
-		var step := minf(distance - optimal_distance, chase_speed * delta)
-		_move_fighter(enemy_node, player_node, Vector3(difference.x, 0.0, difference.y).normalized() * step)
-		_set_locomotion(enemy_node, step / maxf(delta * PLAYER_SPEED, 0.001))
-	elif distance < optimal_distance - 0.3:
-		# Back off slightly
-		var back_step := minf(optimal_distance - distance, PLAYER_SPEED * 0.5 * delta)
-		_move_fighter(enemy_node, player_node, -Vector3(difference.x, 0.0, difference.y).normalized() * back_step)
-		_set_locomotion(enemy_node, back_step / maxf(delta * PLAYER_SPEED, 0.001))
-	else:
-		_set_locomotion(enemy_node, 0.0)
-	
-	# Wakeup game: if player is getting up from knockdown
-	if player_recovery > 0.0 and stun_lock > 0.0 and distance < 2.5:
-		if rng.randf() < float(profile.okizeme_chance):
-			_apply_move(false, {"name": "Meaty", "kind": "attack", "damage": 12, "stun": 10, "cost": 0, "animation": "punch"}, distance)
-			return
-	
-	if ai_clock <= 0.0 and enemy_recovery <= 0.0 and stun_lock <= 0.0:
-		ai_clock = float(profile.decision_interval) * rng.randf_range(0.82, 1.18) if not training_mode else 2.8
-		_ai_take_turn(distance)
+	var dist := enemy_node.global_position.distance_to(player_node.global_position)
+	var player_airborne := bool(player_node.get_meta("airborne", false)) or bool(player_node.get_meta("flying", false))
+	var player_attacking := bool(player_node.get_meta("attack_active", false))
+	var player_recovering := player_recovery > 0.0
+	var player_blocking := player_guard > 0.0
+	var low_health := enemy_hp <= MAX_HP * 0.35
+
+	# Compute utility scores for each action
+	var best_action := "IDLE"
+	var max_score := 0.05
+
+	var actions := ["FLASH_STEP", "PUNISH", "AIR_LAUNCHER", "PERFECT_BLOCK", "RETREAT", "ULTIMATE", "GROUND_COMBO", "CHARGE"]
+	for action in actions:
+		var score := _ai_utility_score(action, dist, profile, player_airborne, player_attacking, player_recovering, player_blocking, low_health)
+		# Difficulty modifier
+		if ai_difficulty == "Easy":
+			score *= rng.randf_range(0.5, 0.8)
+		elif ai_difficulty == "Normal":
+			score *= rng.randf_range(0.8, 1.0)
+		# Hard AI keeps raw scores
+		if score > max_score:
+			max_score = score
+			best_action = action
+
+	_ai_execute_action(best_action, dist, profile)
 
 func _ai_profile() -> Dictionary:
 	match ai_difficulty:
 		"Easy":
-			return {"decision_interval": 1.6, "chase_speed": 0.55, "reaction_time": 0.2, "block_duration": 0.5, "medium_chance": 0.08, "grab_chance": 0.03, "dodge_chance": 0.12, "defense_dodge_rate": 0.22, "ultimate_chance": 0.0, "block_threshold": 0.35, "antiair_chance": 0.05, "whiff_punish_chance": 0.1, "okizeme_chance": 0.05}
+			return {"decision_interval": 0.4, "chase_speed": 0.55, "reaction_time": 0.4, "block_duration": 0.5, "medium_chance": 0.08, "grab_chance": 0.03, "dodge_chance": 0.12, "defense_dodge_rate": 0.22, "ultimate_chance": 0.0, "block_threshold": 0.35, "antiair_chance": 0.05, "whiff_punish_chance": 0.1, "okizeme_chance": 0.05}
 		"Hard":
-			return {"decision_interval": 0.35, "chase_speed": 1.1, "reaction_time": 0.0, "block_duration": 0.7, "medium_chance": 0.65, "grab_chance": 0.25, "dodge_chance": 0.35, "defense_dodge_rate": 0.48, "ultimate_chance": 0.18, "block_threshold": 0.2, "antiair_chance": 0.4, "whiff_punish_chance": 0.6, "okizeme_chance": 0.5}
+			return {"decision_interval": 0.08, "chase_speed": 1.1, "reaction_time": 0.08, "block_duration": 0.7, "medium_chance": 0.65, "grab_chance": 0.25, "dodge_chance": 0.35, "defense_dodge_rate": 0.48, "ultimate_chance": 0.18, "block_threshold": 0.2, "antiair_chance": 0.4, "whiff_punish_chance": 0.6, "okizeme_chance": 0.5}
 		_:
-			return {"decision_interval": 0.8, "chase_speed": 0.85, "reaction_time": 0.05, "block_duration": 0.6, "medium_chance": 0.4, "grab_chance": 0.12, "dodge_chance": 0.22, "defense_dodge_rate": 0.34, "ultimate_chance": 0.08, "block_threshold": 0.3, "antiair_chance": 0.2, "whiff_punish_chance": 0.3, "okizeme_chance": 0.2}
-
-func _ai_should_block(distance: float) -> bool:
-	if training_mode or stun_lock > 0.0 or enemy_guard_timer > 0.0 or not bool(player_node.get_meta("attack_active", false)):
-		return false
-	var attack_state: Dictionary = player_node.get_meta("attack_state", {})
-	if attack_state.is_empty():
-		return false
-	var frame_data: Dictionary = attack_state.get("frame_data", {})
-	if frame_data.is_empty():
-		return false
-	var move: Dictionary = attack_state.get("move", {})
-	if distance > _attack_contact_range(move) + 0.15 or not _has_attack_contact(player_node, enemy_node, move, _attack_contact_range(move) + 0.15):
-		return false
-	var elapsed_frames := float(player_node.get_meta("anim_elapsed", 0.0)) * 60.0
-	var frames_to_impact := float(frame_data.startup_frames) - elapsed_frames
-	var reaction := float(_ai_profile().reaction_time)
-	var block_threshold := float(_ai_profile().block_threshold)
-	return frames_to_impact / 60.0 <= reaction + block_threshold and frames_to_impact >= 0.0
-
-func _ai_take_turn(distance: float) -> void:
-	if training_mode:
-		var training_move := {"name": "Practice Strike", "kind": "attack", "damage": 5, "stun": 4, "cost": 0}
-		_apply_move(false, training_move, distance)
-		return
-	var profile := _ai_profile()
-	var low_health := enemy_hp <= MAX_HP * 0.35
-	if low_health and distance < 2.1:
-		if rng.randf() < 0.32:
-			_apply_move(false, {"name": "Desperate Dodge", "kind": "dodge", "cost": 0, "cue": "DODGE"}, distance)
-			return
-		if rng.randf() < 0.38:
-			_apply_move(false, {"name": "Desperate Guard", "kind": "block", "guard": 18, "cost": 0}, distance)
-			enemy_guard_timer = maxf(0.45, float(profile.block_duration))
-			return
-	if distance <= 1.8 and player_guard > 0.0 and rng.randf() < 0.72:
-		_apply_move(false, {"name": "Grab", "kind": "attack", "grab": true, "cost": 0}, distance)
-		return
-	if distance <= 1.8 and rng.randf() < float(profile.grab_chance):
-		_apply_move(false, {"name": "Grab", "kind": "attack", "grab": true, "cost": 0}, distance)
-		return
-	var options := GameData.legends_arts(opponent_data.get("signature", ""), unlocked_ultimates, opponent_style)
-	var attacks: Array[Dictionary] = []
-	var medium_attacks: Array[Dictionary] = []
-	var ultimates: Array[Dictionary] = []
-	for move in options:
-		if move.get("locked", false):
-			continue
-		if move.get("kind") not in ["attack", "trap", "ultimate"] or int(move.get("cost", 0)) > int(enemy_mp):
-			continue
-		if move.get("kind") == "ultimate":
-			ultimates.append(move)
-		elif str(move.get("tier", "")).to_lower() == "medium" or move.get("kind") == "trap":
-			medium_attacks.append(move)
-		else:
-			attacks.append(move)
-	if distance > 2.3:
-		if distance <= 11.0 and enemy_mp >= 3.0 and rng.randf() < 0.16:
-			var signature_special: Dictionary = options[3]
-			_apply_move(false, signature_special, distance)
-			return
-		if distance <= 9.0 and enemy_mp >= 1.0 and rng.randf() < 0.38:
-			_apply_move(false, {"name": "Ki Blast", "kind": "attack", "tier": "Blast Arts", "damage": 13, "stun": 8, "cost": 1, "animation": "hadoken", "projectile": true, "projectile_range": 9.0}, distance)
-		return
-	if enemy_mp < 1.1 and (distance > 1.65 or rng.randf() < 0.45):
-		_apply_move(false, {"name": "Focus", "kind": "charge", "charge": 1.5, "cost": 0, "cue": "FOCUS"}, distance)
-		return
-	if not ultimates.is_empty() and enemy_mp >= 4.0 and rng.randf() < float(profile.ultimate_chance):
-		var ultimate_move: Dictionary = ultimates[rng.randi_range(0, ultimates.size() - 1)]
-		_apply_move(false, ultimate_move, distance)
-		return
-	if not medium_attacks.is_empty() and enemy_mp >= 2.0 and rng.randf() < float(profile.medium_chance):
-		var medium_move: Dictionary = medium_attacks[rng.randi_range(0, medium_attacks.size() - 1)]
-		_apply_move(false, medium_move, distance)
-		return
-	if rng.randf() < float(profile.dodge_chance) and distance < 1.6:
-		_apply_move(false, {"name": "Dodge", "kind": "dodge", "cost": 0, "cue": "DODGE"}, distance)
-		return
-	if not attacks.is_empty():
-		var basic_move: Dictionary = attacks[rng.randi_range(0, attacks.size() - 1)]
-		_apply_move(false, basic_move, distance)
+			return {"decision_interval": 0.2, "chase_speed": 0.85, "reaction_time": 0.2, "block_duration": 0.6, "medium_chance": 0.4, "grab_chance": 0.12, "dodge_chance": 0.22, "defense_dodge_rate": 0.34, "ultimate_chance": 0.08, "block_threshold": 0.3, "antiair_chance": 0.2, "whiff_punish_chance": 0.3, "okizeme_chance": 0.2}
 
 func _ai_select_punish_move(distance: float) -> Dictionary:
 	var options := GameData.legends_arts(opponent_data.get("signature", ""), unlocked_ultimates, opponent_style)
@@ -3737,6 +3759,7 @@ func _ai_select_punish_move(distance: float) -> Dictionary:
 	elif distance <= 2.0:
 		return {"name": "Punish Kick", "kind": "attack", "damage": 18, "stun": 16, "cost": 0, "animation": "kick"}
 	return {}
+
 
 func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 	if is_player and (match_over or challenge_active):
