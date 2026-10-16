@@ -150,6 +150,14 @@ const ATTACK_MP_GAIN := 0.75
 const MAX_VANISH := 100.0
 const VANISH_DODGE_COST := 50.0
 
+# High-speed dash / flash-step
+const DASH_SPEED := 42.0
+const DASH_DURATION := 0.18
+const DASH_COOLDOWN := 0.5
+const AIR_DASH_SPEED := 30.0
+const SLAM_SPEED := 28.0
+const SLAM_SHOCKWAVE_RADIUS := 4.0
+
 var rng := RandomNumberGenerator.new()
 var player_data: Dictionary = {}
 var opponent_data: Dictionary = {}
@@ -202,6 +210,12 @@ var main_menu_open := true
 var return_to_menu_after_hub := false
 var master_volume := 1.0
 var fullscreen_enabled := false
+
+# Dash state
+var player_dash_timer := 0.0
+var player_dash_cooldown := 0.0
+var player_is_dashing := false
+var player_dash_direction := Vector3.ZERO
 var ai_difficulty := "Normal"
 var pause_menu_open := false
 var ai_defense_clock := 0.0
@@ -298,6 +312,9 @@ var loadout_profiles: Array[Dictionary] = []
 var arena_size := Vector2(1280, 720)
 var camera_shake_strength := 0.0
 var camera_shake_phase := 0.0
+var water_shader_material: ShaderMaterial
+var camera_fov_target := 45.0
+var camera_fov_current := 45.0
 
 func _ready() -> void:
 	# Mobile / low-end device optimizations
@@ -567,6 +584,953 @@ func _spawn_hit_particles(position: Vector3, accent: Color, blocked: bool, is_co
 	particles.global_position = position
 	get_tree().create_timer(1.0).timeout.connect(particles.queue_free.bind(), CONNECT_ONE_SHOT)
 
+# ⚡ LIGHTNING EFFECT (7 steps: squiggle, jagged shape, thickness variation, glow layers, accents, final zap)
+func _spawn_lightning_bolt(source_pos: Vector3, target_pos: Vector3, color: Color, segment_count: int = 8, duration: float = 0.18) -> void:
+	var bolt := Node3D.new()
+	bolt.name = "LightningBolt"
+	arena_root.add_child(bolt)
+	bolt.global_position = source_pos
+
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 4.0
+
+	var current := source_pos
+	var direction := (target_pos - source_pos).normalized()
+	var total_distance := source_pos.distance_to(target_pos)
+	var segment_len := total_distance / float(segment_count)
+
+	for i in range(segment_count):
+		var jitter := Vector3(rng.randf_range(-0.25, 0.25), rng.randf_range(-0.25, 0.25), rng.randf_range(-0.25, 0.25))
+		var next_pos := current + direction * segment_len + jitter
+		if i == segment_count - 1:
+			next_pos = target_pos
+
+		var seg := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = rng.randf_range(0.03, 0.08)
+		cyl.bottom_radius = rng.randf_range(0.03, 0.08)
+		cyl.height = current.distance_to(next_pos)
+		seg.mesh = cyl
+		seg.material_override = material
+
+		var seg_dir := (next_pos - current).normalized()
+		var up := Vector3.UP
+		if absf(seg_dir.dot(up)) > 0.99:
+			up = Vector3.RIGHT
+		seg.look_at(next_pos, up)
+		seg.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
+		bolt.add_child(seg)
+
+		current = next_pos
+
+	# Core bright white line down the center
+	var core := MeshInstance3D.new()
+	var core_cyl := CylinderMesh.new()
+	core_cyl.top_radius = 0.02
+	core_cyl.bottom_radius = 0.02
+	core_cyl.height = total_distance
+	core.mesh = core_cyl
+	var core_mat := StandardMaterial3D.new()
+	core_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	core_mat.albedo_color = Color("#ffffff")
+	core_mat.emission_enabled = true
+	core_mat.emission = Color("#ffffff")
+	core_mat.emission_energy_multiplier = 6.0
+	core.material_override = core_mat
+	core.look_at(target_pos, Vector3.UP)
+	core.translate(Vector3(0.0, -total_distance * 0.5, 0.0))
+	bolt.add_child(core)
+
+	# Glow light
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 6.0
+	light.omni_range = 3.0
+	light.shadow_enabled = false
+	bolt.add_child(light)
+
+	# Animate: flicker then fade
+	var tween := create_tween()
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(core_mat, "emission_energy_multiplier", 0.0, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(light, "light_energy", 0.0, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.chain().tween_callback(bolt.queue_free)
+
+# 💥 ANIME BURST LINES (comic-style impact lines radiating from hit point)
+func _spawn_anime_burst_lines(position: Vector3, color: Color, line_count: int = 12, duration: float = 0.25) -> void:
+	var lines := Node3D.new()
+	lines.name = "AnimeBurstLines"
+	arena_root.add_child(lines)
+	lines.global_position = position
+
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 3.5
+
+	for i in range(line_count):
+		var angle := TAU * float(i) / float(line_count)
+		var dir := Vector3(sin(angle), 0.0, cos(angle))
+		var seg := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.02
+		cyl.bottom_radius = 0.0
+		cyl.height = rng.randf_range(0.6, 1.2)
+		seg.mesh = cyl
+		seg.material_override = material
+		seg.look_at(position + dir * cyl.height, Vector3.UP)
+		seg.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
+		lines.add_child(seg)
+
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 4.0
+	light.omni_range = 3.0
+	light.shadow_enabled = false
+	lines.add_child(light)
+
+	var tween := create_tween()
+	tween.set_parallel()
+	tween.tween_property(material, "albedo_color:a", 0.0, duration)
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, duration)
+	tween.tween_property(light, "light_energy", 0.0, duration)
+	tween.chain().tween_callback(lines.queue_free)
+
+# 📹 ANIME CAMERA PUNCH-IN (rapid FOV snap on heavy/counter hits)
+func _trigger_camera_punch_in(hit_position: Vector3, strength: float = 0.35, duration: float = 0.12) -> void:
+	var cam := get_viewport().get_camera_3d()
+	if not is_instance_valid(cam):
+		return
+	var original_fov := cam.fov
+	cam.fov = clampf(original_fov - strength * 30.0, 20.0, 90.0)
+
+	var target_pos := cam.global_position.lerp(hit_position, 0.35)
+	var tween := create_tween()
+	tween.tween_property(cam, "fov", original_fov, duration * 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(cam, "global_position", target_pos, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+# 🎭 NEGATIVE / SILHOUETTE FLASH (screen invert for heavy/counter hits)
+var _negative_flash_active := false
+func _trigger_negative_flash(duration: float = 0.06) -> void:
+	if _negative_flash_active:
+		return
+	_negative_flash_active = true
+	var invert := ColorRect.new()
+	invert.name = "NegativeFlash"
+	invert.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	invert.modulate = Color(1.0, 1.0, 1.0, 0.0)
+	invert.modulate = Color(1.0, 1.0, 1.0, 1.0)
+	if is_instance_valid(hud):
+		hud.add_child(invert)
+	else:
+		get_tree().get_root().add_child(invert)
+	var tween := create_tween()
+	tween.tween_property(invert, "modulate:a", 0.0, duration * 0.5).set_trans(Tween.TRANS_LINEAR)
+	tween.chained().tween_callback(func(): _negative_flash_active = false)
+	tween.chain().tween_callback(invert.queue_free)
+
+# 🗡️ FULL ANIME HIT SEQUENCE (hit-stop + burst lines + camera punch-in + negative flash)
+func _trigger_anime_hit(hit_position: Vector3, accent: Color, is_heavy: bool = false, is_counter: bool = false) -> void:
+	_spawn_anime_burst_lines(hit_position, accent, 14 if is_heavy else 10, 0.2 if is_heavy else 0.15)
+	_trigger_camera_punch_in(hit_position, 0.4 if is_heavy else 0.25, 0.1 if is_heavy else 0.08)
+	if is_counter or is_heavy:
+		_trigger_negative_flash(0.05 if is_counter else 0.04)
+
+# 🎨 ANIME SILHOUETTE (high-contrast black base for heavy hits)
+func _trigger_silhouette_flash(target: Node3D, duration: float = 0.06) -> void:
+	var mesh: MeshInstance3D
+	for child in target.get_children():
+		if child is MeshInstance3D:
+			mesh = child as MeshInstance3D
+			break
+	if not is_instance_valid(mesh):
+		return
+	var original_mat := mesh.material_override
+	var silhouette := StandardMaterial3D.new()
+	silhouette.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	silhouette.albedo_color = Color("#000000")
+	silhouette.emission_enabled = false
+	mesh.material_override = silhouette
+	var tween := create_tween()
+	tween.tween_property(mesh, "material_override", original_mat, duration).set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_OUT)
+	tween.chain().tween_callback(func(): mesh.material_override = original_mat)
+
+# 🩸 BLOOD SPLATTER (particles on hit)
+func _spawn_blood_splatter(position: Vector3, count: int = 8) -> void:
+	var particles := GPUParticles3D.new()
+	particles.name = "BloodSplatter"
+	particles.emitting = true
+	particles.one_shot = true
+	particles.amount = count
+	particles.lifetime = 0.8
+	particles.explosiveness = 1.0
+	particles.local_coords = false
+	var pmat := ParticleProcessMaterial.new()
+	pmat.gravity = Vector3(0.0, -9.8, 0.0)
+	pmat.initial_velocity_min = 3.0
+	pmat.initial_velocity_max = 6.0
+	pmat.spread = 90.0
+	pmat.scale_min = 0.05
+	pmat.scale_max = 0.15
+	particles.process_material = pmat
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.06
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = Color("#4a0000")
+	material.emission_enabled = true
+	material.emission = Color("#4a0000")
+	material.emission_energy_multiplier = 2.0
+	mesh.material = material
+	particles.draw_pass_1 = mesh
+	arena_root.add_child(particles)
+	particles.global_position = position
+	get_tree().create_timer(1.0).timeout.connect(particles.queue_free.bind(), CONNECT_ONE_SHOT)
+
+# 🔴 SHELL CASINGS (leave debris on floor)
+func _spawn_shell_casing(position: Vector3, direction: Vector3, count: int = 2) -> void:
+	for i in range(count):
+		var shell := MeshInstance3D.new()
+		shell.name = "ShellCasing"
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.025
+		cyl.bottom_radius = 0.025
+		cyl.height = 0.05
+		shell.mesh = cyl
+		var material := StandardMaterial3D.new()
+		material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		material.albedo_color = Color("#d4af37")
+		shell.material_override = material
+		shell.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		arena_root.add_child(shell)
+		var jitter := Vector3(rng.randf_range(-0.3, 0.3), 0.5, rng.randf_range(-0.3, 0.3))
+		shell.global_position = position + jitter
+		shell.rotate_object_local(Vector3.RIGHT, rng.randf_range(0.0, TAU))
+		var slide := direction * rng.randf_range(0.3, 0.8)
+		var tween := create_tween()
+		tween.tween_property(shell, "global_position", position + jitter + slide, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+		get_tree().create_timer(5.0).timeout.connect(shell.queue_free.bind(), CONNECT_ONE_SHOT)
+
+# 💀 KILL / FINAL BLOW SEQUENCE (extended freeze, throw body backward, ash burn)
+func _trigger_kill_sequence(target: Node3D, source: Node3D, push_direction: Vector3, accent: Color) -> void:
+	# Extended hit-stop
+	if hit_stop_controller:
+		hit_stop_controller.apply_hit_stop(0.25)
+	# Throw body backward hard
+	var throw_tween := create_tween()
+	throw_tween.set_parallel()
+	throw_tween.tween_property(target, "global_position", target.global_position + push_direction * 3.0 + Vector3.UP * 1.5, 0.5).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	throw_tween.tween_property(target, "scale", Vector3(0.95, 1.15, 0.95), 0.12)
+	throw_tween.chain().tween_property(target, "scale", Vector3(0.7, 0.7, 0.7), 0.3)
+	# Ash burn effect at target position
+	_spawn_ash_burn(target.global_position, accent)
+	# Silhouette flash on killer
+	_trigger_silhouette_flash(source, 0.04)
+
+# 🔥 ASH BURN (disintegration effect on defeat)
+func _spawn_ash_burn(position: Vector3, color: Color) -> void:
+	var burn := Node3D.new()
+	burn.name = "AshBurn"
+	arena_root.add_child(burn)
+	burn.global_position = position
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 3.0
+	var ring := MeshInstance3D.new()
+	var ring_mesh := CapsuleMesh.new()
+	ring_mesh.radius = 0.5
+	ring_mesh.height = 0.02
+	ring.mesh = ring_mesh
+	ring.material_override = material
+	ring.rotation.x = PI / 2.0
+	burn.add_child(ring)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 4.0
+	light.omni_range = 2.5
+	light.shadow_enabled = false
+	burn.add_child(light)
+	var tween := create_tween()
+	tween.set_parallel()
+	tween.tween_property(material, "albedo_color:a", 0.0, 1.2)
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, 1.2)
+	tween.tween_property(light, "light_energy", 0.0, 1.2)
+	tween.chain().tween_callback(burn.queue_free)
+
+# 💥 ULTIMATE 1: MEGA ENERGY BEAM (Kamehameha / Finisher)
+# Charge aura -> beam release -> shockwave rings -> scorched ground mark
+func _trigger_mega_beam(source: Node3D, target: Node3D, move: Dictionary, accent: Color) -> void:
+	var start_pos := source.global_position + Vector3.UP * 1.2
+	var direction := (target.global_position - start_pos).normalized()
+	var beam_range := float(move.get("projectile_range", 12.0))
+	var end_pos := start_pos + direction * beam_range
+
+	# Charge wind-up: inward-converging energy wisps
+	var charge := Node3D.new()
+	charge.name = "BeamCharge"
+	arena_root.add_child(charge)
+	charge.global_position = start_pos
+	var cmat := StandardMaterial3D.new()
+	cmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	cmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	cmat.albedo_color = accent
+	cmat.emission_enabled = true
+	cmat.emission = accent
+	cmat.emission_energy_multiplier = 5.0
+	var sphere := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 0.5
+	sphere.mesh = sph
+	sphere.material_override = cmat
+	charge.add_child(sphere)
+	var clight := OmniLight3D.new()
+	clight.light_color = accent
+	clight.light_energy = 6.0
+	clight.omni_range = 3.0
+	clight.shadow_enabled = false
+	charge.add_child(clight)
+	var ctween := create_tween()
+	ctween.tween_property(sphere, "scale", Vector3.ZERO, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	ctween.chain().tween_callback(charge.queue_free)
+
+	# Camera zoom-in on character core during charge
+	_trigger_camera_punch_in(start_pos, 0.5, 0.5)
+
+	# Beam release after wind-up
+	get_tree().create_timer(0.5).timeout.connect(func():
+		_spawn_mega_beam_bolt(start_pos, end_pos, direction, beam_range, accent, move, source, target)
+	, CONNECT_ONE_SHOT)
+
+func _spawn_mega_beam_bolt(start_pos: Vector3, end_pos: Vector3, direction: Vector3, beam_range: float, color: Color, move: Dictionary, source: Node3D, target: Node3D) -> void:
+	var beam := Node3D.new()
+	beam.name = "MegaBeam"
+	arena_root.add_child(beam)
+	beam.global_position = start_pos
+
+	var beam_mat := StandardMaterial3D.new()
+	beam_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	beam_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	beam_mat.albedo_color = color
+	beam_mat.emission_enabled = true
+	beam_mat.emission = color
+	beam_mat.emission_energy_multiplier = 6.0
+
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.6
+	cyl.bottom_radius = 0.6
+	cyl.height = start_pos.distance_to(end_pos)
+	var beam_mesh := MeshInstance3D.new()
+	beam_mesh.mesh = cyl
+	beam_mesh.material_override = beam_mat
+	beam_mesh.look_at(end_pos, Vector3.UP)
+	beam_mesh.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
+	beam.add_child(beam_mesh)
+
+	var inner := MeshInstance3D.new()
+	var inner_cyl := CylinderMesh.new()
+	inner_cyl.top_radius = 0.25
+	inner_cyl.bottom_radius = 0.25
+	inner_cyl.height = start_pos.distance_to(end_pos)
+	var inner_mesh := MeshInstance3D.new()
+	inner_mesh.mesh = inner_cyl
+	var imat := StandardMaterial3D.new()
+	imat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	imat.albedo_color = Color("#ffffff")
+	imat.emission_enabled = true
+	imat.emission = Color("#ffffff")
+	imat.emission_energy_multiplier = 8.0
+	inner_mesh.material_override = imat
+	inner_mesh.look_at(end_pos, Vector3.UP)
+	inner_mesh.translate(Vector3(0.0, -inner_cyl.height * 0.5, 0.0))
+	beam.add_child(inner_mesh)
+
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 8.0
+	light.omni_range = 4.0
+	light.shadow_enabled = false
+	beam.add_child(light)
+
+	# Lens flare flash on launch
+	var flare := ColorRect.new()
+	flare.name = "BeamFlare"
+	flare.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	flare.modulate = Color(1.0, 1.0, 1.0, 0.0)
+	if is_instance_valid(hud):
+		hud.add_child(flare)
+	else:
+		get_tree().get_root().add_child(flare)
+	var ftween := create_tween()
+	ftween.tween_property(flare, "modulate:a", 1.0, 0.05)
+	ftween.chain().tween_property(flare, "modulate:a", 0.0, 0.1)
+	ftween.chain().tween_callback(flare.queue_free)
+
+	# Continuous damage tick along beam path
+	var damage := float(move.get("damage", MAX_HP * 0.12))
+	var stun_dmg := float(move.get("stun", 25))
+	var is_player := source == player_node
+	var target_was_guarding := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+	var tick_time := 0.0
+	var beam_duration := 1.2
+
+	var beam_tween := create_tween()
+	beam_tween.tween_property(beam_mat, "emission_energy_multiplier", 0.0, beam_duration)
+	beam_tween.tween_property(imat, "emission_energy_multiplier", 0.0, beam_duration)
+	beam_tween.tween_property(light, "light_energy", 0.0, beam_duration)
+
+	# Damage tick every 0.15s during beam
+	var tick_conn := get_tree().create_timer(0.15, true, false, true)
+	var tick_count := 0
+	var beam_tick_func := func():
+		tick_count += 1
+		if tick_count > beam_duration / 0.15:
+			return
+		# Raycast along beam for damage
+		var space_state := get_world_3d().direct_space_state
+		var query := PhysicsRayQueryParameters3D.new()
+		query.from = start_pos
+		query.to = end_pos
+		query.collide_with_areas = true
+		query.collide_with_bodies = true
+		var result := space_state.intersect_ray(query)
+		if result.has("collider"):
+			var col := result["collider"] as Node3D
+			if col is Node3D and col == target and is_instance_valid(target):
+				_resolve_attack_impact(source, target, move, target_was_guarding, damage * 0.3, stun_dmg * 0.3, is_player, "ultimate", color, start_pos)
+		# Shockwave rings along beam path
+		var ring_pos := start_pos + direction * (tick_count * 1.5)
+		if ring_pos.distance_to(start_pos) < beam_range:
+			_spawn_shockwave_ring(ring_pos, color)
+	tick_conn.timeout.connect(beam_tick_func, CONNECT_ONE_SHOT)
+
+	# Scorched ground mark after beam ends
+	var scorch_func := func():
+		_spawn_scorch_mark(start_pos, end_pos, color)
+		beam.queue_free()
+	get_tree().create_timer(beam_duration).timeout.connect(scorch_func, CONNECT_ONE_SHOT)
+
+# ⚡ ULTIMATE 2: DARK VOID / LIGHTNING SINGULARITY (AOE Vortex)
+# Rune emblem -> shockwave ring -> black hole sphere -> vortex pull + lightning arcs -> AOE ticks -> final burst
+func _trigger_void_vortex(source: Node3D, target: Node3D, move: Dictionary, accent: Color) -> void:
+	var center := target.global_position
+	center.y = 0.0
+
+	# Rune emblem on floor
+	var rune := MeshInstance3D.new()
+	rune.name = "VoidRune"
+	arena_root.add_child(rune)
+	rune.global_position = center
+	var rune_mesh := CapsuleMesh.new()
+	rune_mesh.radius = 1.2
+	rune_mesh.height = 0.05
+	rune.mesh = rune_mesh
+	var rune_mat := StandardMaterial3D.new()
+	rune_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rune_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	rune_mat.albedo_color = accent
+	rune_mat.emission_enabled = true
+	rune_mat.emission = accent
+	rune_mat.emission_energy_multiplier = 3.0
+	rune.material_override = rune_mat
+	rune.rotation.x = PI / 2.0
+
+	# Expanding shockwave ring
+	_spawn_shockwave_ring(center, accent, 3.0, 0.6)
+
+	# Black hole sphere
+	var sphere := Node3D.new()
+	sphere.name = "BlackHole"
+	arena_root.add_child(sphere)
+	sphere.global_position = center + Vector3.UP * 1.0
+	var bh_mat := StandardMaterial3D.new()
+	bh_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bh_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bh_mat.albedo_color = Color("#0a0a1a")
+	bh_mat.emission_enabled = true
+	bh_mat.emission = accent
+	bh_mat.emission_energy_multiplier = 4.0
+	var bh_mesh := MeshInstance3D.new()
+	var bh := SphereMesh.new()
+	bh.radius = 0.1
+	bh_mesh.mesh = bh
+	bh_mesh.material_override = bh_mat
+	sphere.add_child(bh_mesh)
+	var blight := OmniLight3D.new()
+	blight.light_color = accent
+	blight.light_energy = 5.0
+	blight.omni_range = 3.0
+	blight.shadow_enabled = false
+	sphere.add_child(blight)
+
+	var grow := create_tween()
+	grow.tween_property(bh, "scale", Vector3.ONE * 2.0, 0.6).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	grow.chain().tween_callback(func():
+		# Vortex pull + lightning arcs for duration
+		var pull_time := 0.0
+		var pull_conn := get_tree().create_timer(0.1, true, false, true)
+		var damage_applied := []
+		var pull_func := func():
+			pull_time += 0.1
+			if pull_time > 2.0:
+				return
+			# Pull nearby enemies
+			var space_state := get_world_3d().direct_space_state
+			var query := PhysicsShapeQueryParameters3D.new()
+			var shape := SphereShape3D.new()
+			shape.radius = 3.0
+			query.shape = shape
+			query.transform = Transform3D(Transform3D.IDENTITY.basis, center + Vector3.UP * 1.0)
+			query.collide_with_areas = true
+			query.collide_with_bodies = true
+			var results := space_state.intersect_shape(query)
+			for res in results:
+				var col := res["collider"] as Node3D
+				if col is Node3D and col != source and is_instance_valid(col):
+					var dir := (center - col.global_position).normalized()
+					var dist := center.distance_to(col.global_position)
+					if dist > 0.1 and dist < 3.0:
+						var pull_force := dir * (8.0 / maxf(dist, 0.5))
+						if col == target or col == player_node or col == enemy_node:
+							var move_tween := create_tween()
+							move_tween.tween_property(col, "global_position", col.global_position + pull_force * 0.1, 0.1)
+						# Lightning arcs on perimeter
+						if rng.randf() < 0.3:
+							_spawn_lightning_bolt(center + Vector3.UP * 1.0, col.global_position, accent, 6, 0.15)
+			# AOE damage tick every 0.2s
+			if fposmod(pull_time * 10.0, 2.0) == 0.0:
+				var dmg := float(move.get("damage", 20)) * 0.5
+				var stun_d := float(move.get("stun", 15)) * 0.5
+				var is_player := source == player_node
+				var twg := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+				_resolve_attack_impact(source, target, move, twg, dmg, stun_d, is_player, "ultimate", accent, center)
+		pull_conn.timeout.connect(pull_func, CONNECT_ONE_SHOT)
+		# Final collapse burst
+		var collapse_func := func():
+			_spawn_impact_flash(center, accent, false)
+			_trigger_anime_hit(center, accent, true, false)
+			rune.queue_free()
+			sphere.queue_free()
+		get_tree().create_timer(2.2).timeout.connect(collapse_func, CONNECT_ONE_SHOT)
+	)
+
+# ⚙️ ULTIMATE 3: CELESTIAL CLOCKWORK LIGHT PILLAR (Holy / Chrono Strike)
+# Clockwork glyph -> golden pillar drop -> spark burst + rotating gears -> knockup -> fading aftermath
+func _trigger_clockwork_pillar(source: Node3D, target: Node3D, move: Dictionary, accent: Color) -> void:
+	var center := target.global_position
+	center.y = 0.0
+
+	# Clockwork floor glyph (rotating gears)
+	var glyph := MeshInstance3D.new()
+	glyph.name = "ClockworkGlyph"
+	arena_root.add_child(glyph)
+	glyph.global_position = center
+	var glyph_mesh := CapsuleMesh.new()
+	glyph_mesh.radius = 2.0
+	glyph_mesh.height = 0.04
+	glyph.mesh = glyph_mesh
+	var glyph_mat := StandardMaterial3D.new()
+	glyph_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	glyph_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	glyph_mat.albedo_color = Color("#ffd700")
+	glyph_mat.emission_enabled = true
+	glyph_mat.emission = Color("#ffd700")
+	glyph_mat.emission_energy_multiplier = 2.0
+	glyph.material_override = glyph_mat
+	glyph.rotation.x = PI / 2.0
+
+	# Rotating inner rings
+	var ring1 := MeshInstance3D.new()
+	var ring_mesh1 := CapsuleMesh.new()
+	ring_mesh1.radius = 1.4
+	ring_mesh1.height = 0.02
+	ring1.mesh = ring_mesh1
+	ring1.material_override = glyph_mat
+	ring1.rotation.x = PI / 2.0
+	glyph.add_child(ring1)
+	var ring2 := MeshInstance3D.new()
+	var ring_mesh2 := CapsuleMesh.new()
+	ring_mesh2.radius = 0.8
+	ring_mesh2.height = 0.02
+	ring2.mesh = ring_mesh2
+	ring2.material_override = glyph_mat
+	ring2.rotation.x = PI / 2.0
+	glyph.add_child(ring2)
+	var gtween := create_tween()
+	gtween.set_loops(0)
+	gtween.tween_property(ring1, "rotation_degrees", Vector3(0, 0, 360), 2.0)
+	gtween.tween_property(ring2, "rotation_degrees", Vector3(0, 0, -360), 1.5)
+
+	# Pillar drop from high altitude
+	var pillar_start := center + Vector3.UP * 15.0
+	var pillar := MeshInstance3D.new()
+	pillar.name = "LightPillar"
+	arena_root.add_child(pillar)
+	pillar.global_position = pillar_start
+	var pillar_mesh := CylinderMesh.new()
+	pillar_mesh.top_radius = 1.0
+	pillar_mesh.bottom_radius = 1.0
+	pillar_mesh.height = 0.5
+	pillar.mesh = pillar_mesh
+	var pmat := StandardMaterial3D.new()
+	pmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	pmat.albedo_color = Color("#ffffff")
+	pmat.emission_enabled = true
+	pmat.emission = Color("#ffffff")
+	pmat.emission_energy_multiplier = 8.0
+	pillar.material_override = pmat
+	var plight := OmniLight3D.new()
+	plight.light_color = Color("#ffffff")
+	plight.light_energy = 6.0
+	plight.omni_range = 4.0
+	plight.shadow_enabled = false
+	pillar.add_child(plight)
+
+	# Spark burst at impact
+	get_tree().create_timer(0.8).timeout.connect(func():
+		_spawn_impact_flash(center, accent, false)
+		_spawn_hit_particles(center, accent, false, true)
+		_trigger_anime_hit(center, accent, true, false)
+		# Knockup all targets in ring
+		var space_state := get_world_3d().direct_space_state
+		var query := PhysicsShapeQueryParameters3D.new()
+		var shape := SphereShape3D.new()
+		shape.radius = 2.0
+		query.shape = shape
+		query.transform = Transform3D(Transform3D.IDENTITY.basis, center + Vector3.UP * 1.0)
+		query.collide_with_bodies = true
+		var results := space_state.intersect_shape(query)
+		for res in results:
+			var col := res["collider"] as Node3D
+			if col is Node3D and (col == target or col == player_node or col == enemy_node) and col != source:
+				var launch := create_tween()
+				launch.tween_property(col, "global_position", col.global_position + Vector3.UP * 6.0, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+				col.set_meta("airborne", true)
+				col.set_meta("launch_velocity", 10.0)
+				col.set_meta("air_duration", 1.8)
+		# Damage
+		var is_player := source == player_node
+		var twg := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+		_resolve_attack_impact(source, target, move, twg, float(move.get("damage", 26)), float(move.get("stun", 20)), is_player, "ultimate", accent, center)
+	, CONNECT_ONE_SHOT)
+
+	# Pillar descends
+	var fall := create_tween()
+	fall.tween_property(pillar, "global_position", center + Vector3.UP * 1.0, 0.8).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	fall.chain().tween_property(pillar, "scale", Vector3.ONE * 1.5, 0.2)
+	fall.chain().tween_property(pmat, "emission_energy_multiplier", 0.0, 1.0)
+	fall.chain().tween_callback(pillar.queue_free)
+
+	# Glyph fades slowly
+	get_tree().create_timer(2.0).timeout.connect(func():
+		var ft := create_tween()
+		ft.tween_property(glyph_mat, "emission_energy_multiplier", 0.0, 1.5)
+		ft.chain().tween_callback(glyph.queue_free)
+	, CONNECT_ONE_SHOT)
+
+# 🌋 ULTIMATE 4: GROUND FISSURE LINE & ERUPTION (Dark / Fire Slash)
+# Raycast ground -> sequential explosions along line -> crack decals + directional knockback
+func _trigger_fissure_eruption(source: Node3D, target: Node3D, move: Dictionary, accent: Color) -> void:
+	var start := source.global_position
+	start.y = 0.0
+	var direction := (target.global_position - start).normalized()
+	direction.y = 0.0
+	if direction.length_squared() < 0.0001:
+		direction = -source.global_basis.z
+	var line_length := 8.0
+	var segment_count := 6
+	var segment_len := line_length / float(segment_count)
+
+	for i in range(segment_count):
+		var seg_start := start + direction * (segment_len * float(i))
+		var seg_end := start + direction * (segment_len * float(i + 1))
+		var delay := float(i) * 0.06
+		get_tree().create_timer(delay).timeout.connect(func(s: Vector3, e: Vector3):
+			# Raycast down to ground
+			var space_state := get_world_3d().direct_space_state
+			var query := PhysicsRayQueryParameters3D.new()
+			query.from = s + Vector3.UP * 2.0
+			query.to = s - Vector3.UP * 2.0
+			query.collide_with_bodies = true
+			var result := space_state.intersect_ray(query)
+			var ground_y := s.y
+			if result.has("collider"):
+				ground_y = result["position"].y
+			var crack_pos := Vector3(s.x, ground_y + 0.01, s.z)
+			# Ground crack decal
+			_spawn_ground_crack(crack_pos, accent, segment_len)
+			# Upward explosion
+			_spawn_fissure_explosion(crack_pos, accent)
+			# Damage Area3D along segment
+			var dmg_area := Area3D.new()
+			var col_shape := SphereShape3D.new()
+			col_shape.radius = segment_len * 0.6
+			var col := CollisionShape3D.new()
+			col.shape = col_shape
+			dmg_area.add_child(col)
+			dmg_area.global_position = crack_pos
+			arena_root.add_child(dmg_area)
+			get_tree().create_timer(0.3).timeout.connect(func():
+				var overlap_query := PhysicsShapeQueryParameters3D.new()
+				overlap_query.shape = col_shape
+				overlap_query.transform = Transform3D(Transform3D.IDENTITY.basis, crack_pos)
+				overlap_query.collide_with_bodies = true
+				var results := space_state.intersect_shape(overlap_query)
+				# Apply knockback away from line
+				var is_player := source == player_node
+				var twg := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+				_resolve_attack_impact(source, target, move, twg, float(move.get("damage", 22)) * 0.6, float(move.get("stun", 16)) * 0.6, is_player, "ultimate", accent, crack_pos)
+				dmg_area.queue_free()
+			, CONNECT_ONE_SHOT)
+		, CONNECT_ONE_SHOT)
+
+	# Directional knockback push away from line
+	var push_dir := direction
+	get_tree().create_timer(0.4).timeout.connect(func():
+		var tween := create_tween()
+		tween.tween_property(target, "global_position", target.global_position + push_dir * 4.0 + Vector3.UP * 2.0, 0.4)
+		target.set_meta("airborne", true)
+		target.set_meta("launch_velocity", 6.0)
+		target.set_meta("air_duration", 1.2)
+	, CONNECT_ONE_SHOT)
+
+# 🔥 GROUND CRACK DECAL
+func _spawn_ground_crack(position: Vector3, color: Color, width: float) -> void:
+	var crack := MeshInstance3D.new()
+	crack.name = "GroundCrack"
+	arena_root.add_child(crack)
+	crack.global_position = position
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(width, 0.4)
+	crack.mesh = plane
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 2.5
+	crack.material_override = mat
+	crack.rotation.x = PI / 2.0
+	var tween := create_tween()
+	tween.tween_property(mat, "albedo_color:a", 0.0, 3.0)
+	tween.chain().tween_callback(crack.queue_free)
+
+# 💥 FISSURE EXPLOSION
+func _spawn_fissure_explosion(position: Vector3, color: Color) -> void:
+	var exp := Node3D.new()
+	exp.name = "FissureExplosion"
+	arena_root.add_child(exp)
+	exp.global_position = position + Vector3.UP * 0.5
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 5.0
+	var sphere := MeshInstance3D.new()
+	var sph := SphereMesh.new()
+	sph.radius = 0.3
+	sphere.mesh = sph
+	sphere.material_override = mat
+	exp.add_child(sphere)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 6.0
+	light.omni_range = 3.0
+	light.shadow_enabled = false
+	exp.add_child(light)
+	var tween := create_tween()
+	tween.tween_property(sphere, "scale", Vector3.ONE * 2.5, 0.3)
+	tween.tween_property(mat, "albedo_color:a", 0.0, 0.3)
+	tween.tween_property(light, "light_energy", 0.0, 0.3)
+	tween.chain().tween_callback(exp.queue_free)
+
+# 🎵 ULTIMATE 5: SONIC DOMAIN / MUSICAL BARRIER (Rhythm / Sound Field)
+# Central orb -> expanding dome -> rhythmic ripples + musical notes -> sustained field with status ticks
+var _sonic_domains := []
+func _trigger_sonic_domain(source: Node3D, target: Node3D, move: Dictionary, accent: Color) -> void:
+	var center := target.global_position
+	center.y = 0.0
+
+	# Central hovering orb
+	var orb := Node3D.new()
+	orb.name = "SonicOrb"
+	arena_root.add_child(orb)
+	orb.global_position = center + Vector3.UP * 2.0
+	var omat := StandardMaterial3D.new()
+	omat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	omat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	omat.albedo_color = accent
+	omat.emission_enabled = true
+	omat.emission = accent
+	omat.emission_energy_multiplier = 4.0
+	var osphere := MeshInstance3D.new()
+	var osph := SphereMesh.new()
+	osph.radius = 0.3
+	osphere.mesh = osph
+	osphere.material_override = omat
+	orb.add_child(osphere)
+
+	# Expanding dome
+	var dome := MeshInstance3D.new()
+	dome.name = "SonicDome"
+	arena_root.add_child(dome)
+	dome.global_position = center + Vector3.UP * 0.5
+	var dmesh := SphereMesh.new()
+	dmesh.radius = 0.1
+	dmesh.height = 0.1
+	dome.mesh = dmesh
+	var dmat := StandardMaterial3D.new()
+	dmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	dmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	dmat.albedo_color = Color(accent.r, accent.g, accent.b, 0.4)
+	dmat.emission_enabled = true
+	dmat.emission = accent
+	dmat.emission_energy_multiplier = 2.0
+	dome.material_override = dmat
+
+	var duration := float(move.get("duration", 4.0))
+	var max_radius := 5.0
+
+	var dtween := create_tween()
+	dtween.tween_property(dome, "scale", Vector3.ONE * max_radius, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	dtween.chained().tween_callback(func():
+		# Sustained field: periodic status ticks
+		var tick_time := 0.0
+		var tick_conn := get_tree().create_timer(0.5, true, false, true)
+		var domain_data := {"dome": dome, "orb": orb, "center": center, "radius": max_radius, "tick_conn": tick_conn}
+		_sonic_domains.append(domain_data)
+		tick_conn.timeout.connect(func():
+			tick_time += 0.5
+			if tick_time > duration:
+				return
+			# Rhythmic ripples
+			var ripple := MeshInstance3D.new()
+			var rmesh := CapsuleMesh.new()
+			rmesh.radius = 0.02
+			rmesh.height = max_radius * 2.0
+			ripple.mesh = rmesh
+			var rmat := StandardMaterial3D.new()
+			rmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			rmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			rmat.albedo_color = accent
+			rmat.emission_enabled = true
+			rmat.emission = accent
+			ripple.material_override = rmat
+			ripple.rotation.x = PI / 2.0
+			ripple.global_position = center + Vector3.UP * 0.5
+			arena_root.add_child(ripple)
+			var rt := create_tween()
+			rt.tween_property(rmesh, "radius", max_radius * 1.1, 0.4)
+			rt.tween_property(rmat, "albedo_color:a", 0.0, 0.4)
+			rt.tween_property(rmat, "emission_energy_multiplier", 0.0, 0.4)
+			rt.chain().tween_callback(ripple.queue_free)
+			# Status effect: buff player / debuff enemy
+			var is_player := source == player_node
+			var twg := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+			if is_player:
+				# Damage enemy in domain
+				var dmg := float(move.get("damage", 8)) * 0.4
+				var stun_d := float(move.get("stun", 10)) * 0.4
+				_resolve_attack_impact(source, target, move, twg, dmg, stun_d, is_player, "ultimate", accent, center)
+			else:
+				var dmg := float(move.get("damage", 8)) * 0.4
+				var stun_d := float(move.get("stun", 10)) * 0.4
+				_resolve_attack_impact(source, target, move, twg, dmg, stun_d, is_player, "ultimate", accent, center)
+		, CONNECT_ONE_SHOT)
+		# Initial damage
+		var is_player := source == player_node
+		var twg := bool(source.get_meta("attack_state", {}).get("target_was_guarding", false))
+		_resolve_attack_impact(source, target, move, twg, float(move.get("damage", 12)), float(move.get("stun", 10)), is_player, "ultimate", accent, center)
+	)
+	# Dome fades after duration
+	get_tree().create_timer(duration).timeout.connect(func():
+		var ft := create_tween()
+		ft.tween_property(dmat, "albedo_color:a", 0.0, 0.8)
+		ft.tween_property(dmat, "emission_energy_multiplier", 0.0, 0.8)
+		ft.tween_property(omat, "emission_energy_multiplier", 0.0, 0.8)
+		ft.chain().tween_callback(dome.queue_free)
+		ft.chain().tween_callback(orb.queue_free)
+	, CONNECT_ONE_SHOT)
+
+# ⚡ SHOCKWAVE RING (shared helper)
+func _spawn_shockwave_ring(position: Vector3, color: Color, radius: float = 2.0, duration: float = 0.5) -> void:
+	var ring := Node3D.new()
+	ring.name = "ShockwaveRing"
+	arena_root.add_child(ring)
+	ring.global_position = position + Vector3.UP * 0.05
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	mat.emission_enabled = true
+	mat.emission = color
+	mat.emission_energy_multiplier = 3.0
+	var mesh := MeshInstance3D.new()
+	var capsule := CapsuleMesh.new()
+	capsule.radius = 0.03
+	capsule.height = radius * 2.0
+	mesh.mesh = capsule
+	mesh.material_override = mat
+	mesh.rotation.x = PI / 2.0
+	ring.add_child(mesh)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 4.0
+	light.omni_range = radius
+	light.shadow_enabled = false
+	ring.add_child(light)
+	var tween := create_tween()
+	tween.tween_property(capsule, "radius", radius * 1.5, duration)
+	tween.tween_property(mat, "albedo_color:a", 0.0, duration)
+	tween.tween_property(mat, "emission_energy_multiplier", 0.0, duration)
+	tween.tween_property(light, "light_energy", 0.0, duration)
+	tween.chain().tween_callback(ring.queue_free)
+
+# 🔥 SCORCHED GROUND MARK (beam aftermath)
+func _spawn_scorch_mark(start_pos: Vector3, end_pos: Vector3, color: Color) -> void:
+	var mark := MeshInstance3D.new()
+	mark.name = "ScorchMark"
+	arena_root.add_child(mark)
+	var dir := (end_pos - start_pos).normalized()
+	dir.y = 0.0
+	var dist := start_pos.distance_to(end_pos)
+	var mid := start_pos + dir * dist * 0.5
+	mark.global_position = mid + Vector3.UP * 0.02
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(dist, 1.0)
+	mark.mesh = plane
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = Color("#1a0a0a")
+	mat.emission_enabled = true
+	mat.emission = Color("#3a1a0a")
+	mat.emission_energy_multiplier = 1.5
+	mark.material_override = mat
+	mark.rotation.x = PI / 2.0
+	mark.look_at(mid + dir, Vector3.UP)
+	var tween := create_tween()
+	tween.tween_property(mat, "albedo_color:a", 0.0, 4.0)
+	tween.tween_property(mat, "emission_energy_multiplier", 0.0, 4.0)
+	tween.chain().tween_callback(mark.queue_free)
+
+
+
 func _activate_hitboxes(fighter: Node3D, hit_type: String, active: bool, limb: String = "") -> void:
 	for hitbox_node in fighter.find_children("*", "Area3D", true, false):
 		var hitbox := hitbox_node as Area3D
@@ -647,6 +1611,40 @@ func _build_world() -> void:
 	arena_root.add_child(floor)
 	_add_arena_grid()
 	_add_forest()
+
+	# Water environment setup: flat plane with vertex shader wave animation
+	var water := MeshInstance3D.new()
+	water.name = "WaterSurface"
+	var water_plane := PlaneMesh.new()
+	water_plane.size = Vector2(30.0, 30.0)
+	water_plane.subdivide_depth = 32
+	water_plane.subdivide_width = 32
+	water.mesh = water_plane
+	water.position.y = -0.04
+	var water_shader := ShaderMaterial.new()
+	water_shader.shader = Shader.new()
+	water_shader.shader.code = """
+shader_type spatial;
+render_mode depth_draw_opaque, cull_disabled;
+uniform float time : hint_range(0.0, 1000.0);
+uniform vec4 water_color = vec4(0.15, 0.35, 0.6, 1.0);
+uniform vec4 foam_color = vec4(0.9, 0.95, 1.0, 1.0);
+varying float wave_height;
+void vertex() {
+    float wave1 = sin(VERTEX.x + TIME * 1.5);
+    float wave2 = sin(VERTEX.z - TIME * 1.2);
+    VERTEX.y += (wave1 + wave2) * 0.15;
+    wave_height = (wave1 + wave2) * 0.5 + 0.5;
+}
+void fragment() {
+    ALBEDO = mix(water_color.rgb, foam_color.rgb, wave_height * 0.3);
+    ALPHA = water_color.a;
+}
+"""
+	water.material_override = water_shader
+	water_shader.set_shader_parameter("time", 0.0)
+	water_shader_material = water_shader
+	arena_root.add_child(water)
 
 	camera = Camera3D.new()
 	camera.name = "BattleCamera"
@@ -812,11 +1810,11 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	combat.animation_player = root.get_node_or_null("AnimationPlayer") as AnimationPlayer
 
 	# Connect combat signals
-	combat.hp_changed.connect(_on_combat_hp_changed.bind(root))
-	combat.mp_changed.connect(_on_combat_mp_changed.bind(root))
-	combat.stun_changed.connect(_on_combat_stun_changed.bind(root))
+	combat.hp_changed.connect(_on_combat_hp_changed)
+	combat.mp_changed.connect(_on_combat_mp_changed)
+	combat.stun_changed.connect(_on_combat_stun_changed)
 	combat.move_started.connect(_on_combat_move_started.bind(root))
-	combat.challenge_requested.connect(_on_combat_challenge_requested.bind(root))
+	combat.challenge_requested.connect(_on_combat_challenge_requested)
 	combat.challenge_restarted.connect(_on_combat_challenge_restarted.bind(root))
 	combat.stunned.connect(_on_combat_stunned.bind(root))
 	combat.defeated.connect(_on_combat_defeated.bind(root))
@@ -826,7 +1824,7 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 		push_error("The selected fighter model has no AnimationPlayer.")
 		return root
 	for looping_animation in ["idle", "walk", "charge", "block", "stun"]:
-		var animation := animation_player.get_animation(looping_animation)
+		var animation := animation_player.get_animation(looping_animation) if animation_player.has_animation(looping_animation) else null
 		if animation != null:
 			animation.loop_mode = Animation.LOOP_LINEAR
 	if skeleton.find_bone("DEF-upper_arm.L") >= 0:
@@ -994,13 +1992,13 @@ func _create_hitbox(fighter: Node3D, skeleton: Skeleton3D, def: Dictionary) -> O
 	hitbox.hurt_box_entered.connect(_on_hitbox_hurtbox_entered.bind(fighter))
 	return hitbox
 
-func _on_hitbox_hurtbox_entered(hitbox, hurtbox, source_fighter: Node3D) -> void:
+func _on_hitbox_hurtbox_entered(source_fighter: Node3D, hurt_box: Object) -> void:
 	var attacker: Node3D = source_fighter
 	var target: Node3D
-	if hurtbox is SimpleHurtBox3D and hurtbox.health != null and hurtbox.health.entity is Node3D:
-		target = hurtbox.health.entity
+	if hurt_box is SimpleHurtBox3D and hurt_box.health != null and hurt_box.health.entity is Node3D:
+		target = hurt_box.health.entity
 	else:
-		target = hurtbox.get_parent().get_parent() as Node3D
+		target = hurt_box.get_parent().get_parent() as Node3D
 	if not is_instance_valid(target) or target == attacker:
 		return
 	if not attacker.has_meta("attack_active") or not bool(attacker.get_meta("attack_active")):
@@ -1008,10 +2006,10 @@ func _on_hitbox_hurtbox_entered(hitbox, hurtbox, source_fighter: Node3D) -> void
 	var attack_state: Dictionary = attacker.get_meta("attack_state", {})
 	if attack_state.is_empty() or bool(attack_state.get("impact_resolved", false)):
 		return
-	var damage_mult := float(hurtbox.modifiers[1].multiplier if hurtbox.modifiers.has(1) else 1.0)
+	var damage_mult := float(hurt_box.modifiers[1].multiplier if hurt_box.modifiers.has(1) else 1.0)
 	attack_state["hitbox_hit"] = true
 	attack_state["hit_damage_mult"] = damage_mult
-	attack_state["hit_bone"] = hurtbox.name
+	attack_state["hit_bone"] = hurt_box.name
 	attacker.set_meta("attack_state", attack_state)
 	
 	# Also emit hit_detected for FighterCombat (simulating GoHitHurt API)
@@ -1026,13 +2024,13 @@ func _on_hitbox_entered(area: Area3D) -> void:
 	pass
 
 # FighterCombat signal handlers
-func _on_combat_hp_changed(fighter: Node3D, hp: float, max_hp: float) -> void:
+func _on_combat_hp_changed(hp: float, max_hp: float) -> void:
 	_update_hp_bars()
 
-func _on_combat_mp_changed(fighter: Node3D, mp: float, max_mp: float) -> void:
+func _on_combat_mp_changed(mp: float, max_mp: float) -> void:
 	_update_mp_bars()
 
-func _on_combat_stun_changed(fighter: Node3D, value: float, max_value: float) -> void:
+func _on_combat_stun_changed(value: float, max_value: float) -> void:
 	_update_stun_bars()
 
 func _on_combat_move_started(fighter: Node3D, move: Object) -> void:
@@ -1040,7 +2038,7 @@ func _on_combat_move_started(fighter: Node3D, move: Object) -> void:
 	fighter.set_meta("current_move", move)
 	_show_feedback("%s · %s" % [fighter.name, move.display_name])
 
-func _on_combat_challenge_requested(fighter: Node3D, move: Object) -> void:
+func _on_combat_challenge_requested(move: Object) -> void:
 	_show_feedback("ULTIMATE: %s · COMPLETE CHALLENGE" % move.display_name)
 	# TODO: Show challenge UI (Scrabble word, chess puzzle, etc.)
 
@@ -2100,6 +3098,30 @@ func _update_player_movement(delta: float) -> void:
 		_set_locomotion(player_node, 0.0)
 		player_ground_velocity = Vector3.ZERO
 		return
+	# Dash input: double-tap or dedicated dash action
+	if player_dash_cooldown > 0.0:
+		player_dash_cooldown -= delta
+	if player_is_dashing:
+		player_dash_timer -= delta
+		if player_dash_timer <= 0.0:
+			_end_dash()
+		else:
+			var dash_move := player_dash_direction * (AIR_DASH_SPEED if bool(player_node.get_meta("airborne", false)) else DASH_SPEED) * delta
+			_move_fighter(player_node, enemy_node, dash_move)
+			_set_locomotion(player_node, 1.0)
+			return
+	if Input.is_action_just_pressed("action_dash") or (joystick_vector.length() > 0.9 and Input.is_action_just_pressed("action_dash")):
+		var dash_dir := Vector3(joystick_vector.x, 0.0, joystick_vector.y)
+		if dash_dir.length_squared() < 0.01:
+			dash_dir = (enemy_node.global_position - player_node.global_position)
+			dash_dir.y = 0.0
+			if dash_dir.length_squared() < 0.0001:
+				dash_dir = -player_node.global_basis.z
+		if bool(player_node.get_meta("airborne", false)):
+			_perform_air_dash(dash_dir)
+		else:
+			_perform_dash(dash_dir)
+		return
 	if bool(player_node.get_meta("attack_active", false)):
 		if flight_enabled:
 			_update_flight_movement(input_vector, delta, false)
@@ -2214,6 +3236,253 @@ func _on_flight_button_down() -> void:
 func _on_flight_button_up() -> void:
 	_set_flight_vertical_input(true, false)
 
+# ⚡ LOW-STANCE DASH / FLASH STEP
+func _perform_dash(direction: Vector3) -> void:
+	if player_is_dashing or player_dash_cooldown > 0.0 or stun_lock > 0.0 or challenge_active:
+		return
+	if bool(player_node.get_meta("attack_active", false)) and not bool(player_node.get_meta("airborne", false)):
+		return
+	player_is_dashing = true
+	player_dash_timer = DASH_DURATION
+	player_dash_cooldown = DASH_COOLDOWN
+	player_dash_direction = direction.normalized()
+	var is_air := bool(player_node.get_meta("airborne", false)) or bool(player_node.get_meta("flying", false))
+	var dash_speed := AIR_DASH_SPEED if is_air else DASH_SPEED
+	var dash_distance := dash_speed * DASH_DURATION
+	var end_pos := player_node.global_position + player_dash_direction * dash_distance
+	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
+	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
+	if is_air:
+		end_pos.y = clampf(end_pos.y, 0.0, 6.0)
+	else:
+		end_pos.y = player_node.position.y
+	# Speed lines / wind trail
+	_spawn_speed_lines(player_node.global_position, end_pos, GameData.CHARACTERS[player_character_index].accent)
+	# Low stance / silhouette trail
+	_play_fighter_action(player_node, "dash", DASH_DURATION)
+	var tween := create_tween()
+	tween.tween_property(player_node, "global_position", end_pos, DASH_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.chain().tween_callback(func(): _end_dash())
+
+func _end_dash() -> void:
+	player_is_dashing = false
+	player_dash_timer = 0.0
+
+# ⚡ SPEED LINES / WIND TRAIL (radiates past camera during high speed)
+func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> void:
+	var lines := Node3D.new()
+	lines.name = "SpeedLines"
+	arena_root.add_child(lines)
+	var dir := (end_pos - start_pos).normalized()
+	var distance := start_pos.distance_to(end_pos)
+	var mid := start_pos + dir * distance * 0.5
+	lines.global_position = mid
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 3.0
+	for i in range(6):
+		var seg := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.02
+		cyl.bottom_radius = 0.0
+		cyl.height = rng.randf_range(0.6, 1.4)
+		seg.mesh = cyl
+		seg.material_override = material
+		var angle := TAU * float(i) / 6.0
+		var side := Vector3(cos(angle), 0.0, sin(angle)) * rng.randf_range(0.4, 1.0)
+		seg.global_position = mid + side
+		seg.look_at(mid + dir * 2.0, Vector3.UP)
+		seg.rotate_object_local(Vector3.RIGHT, PI / 2.0)
+		lines.add_child(seg)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 3.0
+	light.omni_range = 3.0
+	light.shadow_enabled = false
+	lines.add_child(light)
+	var tween := create_tween()
+	tween.tween_property(material, "albedo_color:a", 0.0, 0.25)
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.25)
+	tween.tween_property(light, "light_energy", 0.0, 0.25)
+	tween.chain().tween_callback(lines.queue_free)
+
+# 🗡️ WEAPON SLASH TRAIL (crescent arc following blade tip)
+var _slash_trail_active := false
+func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc_height: float = 0.8) -> void:
+	if _slash_trail_active:
+		return
+	_slash_trail_active = true
+	var trail := Node3D.new()
+	trail.name = "WeaponTrail"
+	arena_root.add_child(trail)
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 4.0
+	var mid := start_pos + (end_pos - start_pos) * 0.5 + Vector3.UP * arc_height
+	var seg1 := MeshInstance3D.new()
+	var cyl1 := CylinderMesh.new()
+	cyl1.top_radius = 0.06
+	cyl1.bottom_radius = 0.02
+	cyl1.height = start_pos.distance_to(mid)
+	seg1.mesh = cyl1
+	seg1.material_override = material
+	seg1.look_at(mid, Vector3.UP)
+	seg1.translate(Vector3(0.0, -cyl1.height * 0.5, 0.0))
+	trail.add_child(seg1)
+	var seg2 := MeshInstance3D.new()
+	var cyl2 := CylinderMesh.new()
+	cyl2.top_radius = 0.02
+	cyl2.bottom_radius = 0.06
+	cyl2.height = mid.distance_to(end_pos)
+	seg2.mesh = cyl2
+	seg2.material_override = material
+	seg2.look_at(end_pos, Vector3.UP)
+	seg2.translate(Vector3(0.0, -cyl2.height * 0.5, 0.0))
+	trail.add_child(seg2)
+	var light := OmniLight3D.new()
+	light.light_color = color
+	light.light_energy = 4.0
+	light.omni_range = 2.5
+	light.shadow_enabled = false
+	trail.add_child(light)
+	var tween := create_tween()
+	tween.tween_property(material, "albedo_color:a", 0.0, 0.15)
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.15)
+	tween.tween_property(light, "light_energy", 0.0, 0.15)
+	tween.chained().tween_callback(func(): _slash_trail_active = false)
+	tween.chain().tween_callback(trail.queue_free)
+
+# 💥 DIRECTIONAL IMPACT SPARKS (from collision contact point)
+func _spawn_impact_sparks(position: Vector3, normal: Vector3, color: Color, count: int = 12) -> void:
+	var particles := GPUParticles3D.new()
+	particles.name = "ImpactSparks"
+	particles.emitting = true
+	particles.one_shot = true
+	particles.amount = count
+	particles.lifetime = 0.5
+	particles.explosiveness = 1.0
+	particles.local_coords = false
+	var pmat := ParticleProcessMaterial.new()
+	pmat.gravity = Vector3(0.0, -8.0, 0.0)
+	pmat.initial_velocity_min = 4.0
+	pmat.initial_velocity_max = 8.0
+	pmat.velocity_dir = normal
+	pmat.spread = 45.0
+	pmat.scale_min = 0.04
+	pmat.scale_max = 0.12
+	particles.process_material = pmat
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.06, 0.06, 0.06)
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 3.0
+	mesh.material = material
+	particles.draw_pass_1 = mesh
+	arena_root.add_child(particles)
+	particles.global_position = position
+	get_tree().create_timer(1.0).timeout.connect(particles.queue_free.bind(), CONNECT_ONE_SHOT)
+
+# 🏃‍♂️ AIR DASH / LAUNCHER CHASE (dash after airborne enemy)
+func _perform_air_dash(direction: Vector3) -> void:
+	if player_is_dashing or player_dash_cooldown > 0.0 or stun_lock > 0.0:
+		return
+	if not bool(player_node.get_meta("airborne", false)):
+		return
+	player_is_dashing = true
+	player_dash_timer = DASH_DURATION
+	player_dash_cooldown = DASH_COOLDOWN
+	player_dash_direction = direction.normalized()
+	var end_pos := player_node.global_position + player_dash_direction * (AIR_DASH_SPEED * DASH_DURATION)
+	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
+	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
+	end_pos.y = clampf(end_pos.y, 0.0, 6.0)
+	_spawn_speed_lines(player_node.global_position, end_pos, GameData.CHARACTERS[player_character_index].accent)
+	_play_fighter_action(player_node, "dash", DASH_DURATION)
+	var tween := create_tween()
+	tween.tween_property(player_node, "global_position", end_pos, DASH_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.chain().tween_callback(func(): _end_dash())
+
+# 💥 DOWNWARD SLAM FINISHER (ground impact shockwave)
+func _perform_downward_slam(target: Node3D, source: Node3D, accent: Color) -> void:
+	var slam_pos := target.global_position
+	slam_pos.y = 0.0
+	# Throw target downward fast
+	var tween := create_tween()
+	tween.set_parallel()
+	tween.tween_property(target, "global_position", slam_pos, 0.25).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.tween_property(target, "scale", Vector3(1.1, 0.7, 1.1), 0.12)
+	tween.chain().tween_property(target, "scale", Vector3.ONE, 0.2)
+	# Ground impact shockwave / dust burst
+	_spawn_ground_shockwave(slam_pos, accent)
+	_camera_punch_in(slam_pos, 0.5, 0.15)
+	_show_feedback("GROUND SLAM · IMPACT")
+
+func _spawn_ground_shockwave(position: Vector3, color: Color) -> void:
+	var wave := Node3D.new()
+	wave.name = "GroundShockwave"
+	arena_root.add_child(wave)
+	wave.global_position = position
+	var material := StandardMaterial3D.new()
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.albedo_color = color
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = 3.0
+	var ring := MeshInstance3D.new()
+	var ring_mesh := CapsuleMesh.new()
+	ring_mesh.radius = 0.02
+	ring_mesh.height = SLAM_SHOCKWAVE_RADIUS * 2.0
+	ring.mesh = ring_mesh
+	ring.material_override = material
+	ring.rotation.x = PI / 2.0
+	wave.add_child(ring)
+	var tween := create_tween()
+	tween.set_parallel()
+	tween.tween_property(ring_mesh, "radius", SLAM_SHOCKWAVE_RADIUS, 0.4)
+	tween.tween_property(material, "albedo_color:a", 0.0, 0.4)
+	tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.4)
+	tween.chain().tween_callback(wave.queue_free)
+
+# 🧱 WALL BOUNCE
+func _apply_wall_bounce(fighter: Node3D, hit_normal: Vector3, bounce_strength: float = 12.0) -> void:
+	var pos := fighter.global_position
+	if absf(pos.x) >= ARENA_LIMIT - 0.5:
+		pos.x = clampf(pos.x, -ARENA_LIMIT, ARENA_LIMIT)
+		var vel := float(fighter.get_meta("launch_velocity", 0.0))
+		fighter.set_meta("launch_velocity", vel * -0.5)
+		fighter.set_meta("air_gravity", AIR_GRAVITY * 1.5)
+	if absf(pos.z) >= ARENA_LIMIT - 0.5:
+		pos.z = clampf(pos.z, -ARENA_LIMIT, ARENA_LIMIT)
+		var vel := float(fighter.get_meta("launch_velocity", 0.0))
+		fighter.set_meta("launch_velocity", vel * -0.5)
+		fighter.set_meta("air_gravity", AIR_GRAVITY * 1.5)
+	fighter.global_position = pos
+
+# 📹 CAMERA PUNCH-IN (rapid FOV snap on heavy hits)
+func _camera_punch_in(hit_position: Vector3, strength: float = 0.35, duration: float = 0.12) -> void:
+	if not is_instance_valid(camera):
+		return
+	camera_fov_target = clampf(45.0 - strength * 30.0, 20.0, 90.0)
+	var cam_pos := camera.global_position
+	var target_pos := cam_pos.lerp(hit_position, 0.35)
+	var tween := create_tween()
+	tween.tween_property(camera, "fov", 45.0, duration * 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tween.tween_property(camera, "global_position", target_pos, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+
 func _move_fighter(fighter: Node3D, other: Node3D, displacement: Vector3) -> void:
 	var target := fighter.position + displacement
 	target.x = clampf(target.x, -ARENA_LIMIT, ARENA_LIMIT)
@@ -2238,9 +3507,9 @@ func _face_fighter(fighter: Node3D, target: Node3D, delta := 0.0) -> void:
 	var target_position := target.global_position
 	target_position.y = fighter.global_position.y
 	if fighter.global_position.distance_squared_to(target_position) > 0.0001:
-		var target_basis := Basis.looking_at(target_position - fighter.global_position, Vector3.UP, true)
-		var turn_blend := 1.0 if delta <= 0.0 else 1.0 - exp(-delta * 12.0)
-		fighter.global_basis = fighter.global_basis.slerp(target_basis, turn_blend)
+		var target_basis := Basis.looking_at(target_position - fighter.global_position, Vector3.UP, true).orthonormalized()
+		var turn_blend := 1.0 if delta <= 0.0 else 1.0 - exp(-delta * 24.0)
+		fighter.global_basis = fighter.global_basis.orthonormalized().slerp(target_basis, turn_blend)
 
 func _update_ai(delta: float) -> void:
 	if not is_instance_valid(enemy_node) or challenge_active:
@@ -2498,9 +3767,13 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 		move["aerial"] = true
 		move["name"] = "Air " + str(move.get("name", "Attack"))
 	if is_player and bool(source.get_meta("attack_active", false)) and kind in ["attack", "trap", "ultimate"]:
-		if not source.has_meta("pending_attack_move"):
-			source.set_meta("pending_attack_move", move.duplicate(true))
-		return
+		if _can_cancel_attack(source, move):
+			source.remove_meta("pending_attack_move")
+			_cancel_attack(source)
+		else:
+			if not source.has_meta("pending_attack_move"):
+				source.set_meta("pending_attack_move", move.duplicate(true))
+			return
 	if is_player and kind == "attack":
 		var basic_type := str(move.get("attack_type", ""))
 		if basic_type in ["punch", "kick"] and player_basic_combo_clock > 0.0 and player_basic_combo_last_action != basic_type:
@@ -2652,6 +3925,37 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 		source.set_meta("attack_active", true)
 		player_recovery = 0.0 if is_player else player_recovery
 		enemy_recovery = 0.48 if not is_player else enemy_recovery
+
+		# Ultimate special attacks - cinematic, bypass normal animation
+		var ultimate_type := str(move.get("ultimate_type", ""))
+		if kind == "ultimate" and not ultimate_type.is_empty():
+			source.set_meta("attack_state", {
+				"target": target,
+				"move": move.duplicate(true),
+				"target_was_guarding": target_was_guarding,
+				"damage": damage,
+				"stun_damage": stun_damage,
+				"is_player": is_player,
+				"kind": kind,
+				"accent": character.accent,
+				"lunge_start": source.global_position,
+				"lunge_complete": true,
+				"impact_resolved": false,
+				"hitboxes_active": false
+			})
+			if ultimate_type == "mega_beam":
+				_trigger_mega_beam(source, target, move, character.accent)
+			elif ultimate_type == "void_vortex":
+				_trigger_void_vortex(source, target, move, character.accent)
+			elif ultimate_type == "clockwork_pillar":
+				_trigger_clockwork_pillar(source, target, move, character.accent)
+			elif ultimate_type == "fissure_eruption":
+				_trigger_fissure_eruption(source, target, move, character.accent)
+			elif ultimate_type == "sonic_domain":
+				_trigger_sonic_domain(source, target, move, character.accent)
+			_update_hud()
+			return
+
 		_animate_attack(source, target, move, target_was_guarding, damage, stun_damage, is_player, kind, character.accent)
 	_update_hud()
 
@@ -2768,13 +4072,10 @@ func _clear_grapple() -> void:
 	grapple_timer = 0.0
 	grapple_escape_progress = 0.0
 
-func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> void:
-	if not is_instance_valid(fighter):
-		return
+func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
 	if not is_instance_valid(animation_player):
-		push_error("Fighter animation player is missing for %s." % fighter.name)
-		return
+		return "idle"
 	var clip_name := ""
 	var is_player_fighter := fighter == player_node
 	match action:
@@ -2827,13 +4128,23 @@ func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> v
 		var fallbacks := {
 			"punch": "jab", "light_combo_1": "jab", "light_combo_2": "cross", "light_combo": "jab",
 			"aerial_attack": "kick_flying", "vanish_step": "dodge", "dash_back": "dodge",
-			"awakened_arts": "victory", "special_move": "hadoken", "ki_blast": "hadoken", "beam": "hadoken",
-			"beam_fire": "hadoken", "hadoken_kick": "hadoken", "strike_arts": "kick_round", "rising_rush": "shoryuken",
+			"awakened_arts": "victory", "special_move": "kick_round", "ki_blast": "hadoken", "beam": "hadoken",
+			"beam_fire": "hadoken", "hadoken_kick": "hadoken", "strike_arts": "kick_round", "rising_rush": "uppercut",
 			"kick": "kick_front", "heavy_attack": "hook", "hit": "hit_light", "knockback": "hit_heavy",
 		}
 		clip_name = str(fallbacks.get(clip_name, "idle"))
 		if not animation_player.has_animation(clip_name):
 			clip_name = "idle"
+	return clip_name
+
+func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> void:
+	if not is_instance_valid(fighter):
+		return
+	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
+	if not is_instance_valid(animation_player):
+		push_error("Fighter animation player is missing for %s." % fighter.name)
+		return
+	var clip_name := _resolve_clip_name(fighter, action)
 	var clip := animation_player.get_animation(clip_name)
 	var action_duration := maxf(duration, 0.05)
 	var action_generation := int(fighter.get_meta("action_generation", 0)) + 1
@@ -2878,6 +4189,8 @@ func _update_fighter_animations(delta: float) -> void:
 			var next_height: float = fighter.position.y + vertical_speed * delta
 			fighter.set_meta("launch_velocity", vertical_speed)
 			remaining_air_time = maxf(0.0, air_duration - air_elapsed)
+			# Wall bounce
+			_apply_wall_bounce(fighter, Vector3.ZERO)
 			if next_height <= 0.0 and vertical_speed <= 0.0:
 				fighter.position.y = 0.0
 				fighter.set_meta("airborne", false)
@@ -2929,11 +4242,13 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 	var animation := _attack_animation(move)
 	_play_sfx("attack_swing", -13.0, 0.08)
 	source.set_meta("attack_count", int(source.get_meta("attack_count", 0)) + 1)
-	var frame_data := _attack_frame_data(animation, move)
-	var duration := float(frame_data.total_frames) / 60.0
 	var action := "aerial_kick" if animation == "kick" and bool(move.get("aerial", false)) else ("aerial_punch" if animation == "punch" and bool(move.get("aerial", false)) else ("back_kick" if animation == "kick" and bool(move.get("back_kick", false)) else animation))
+	var attack_clip := _resolve_clip_name(source, action)
+	var frame_data := _attack_frame_data(animation, move, attack_clip)
+	var duration := float(frame_data.total_frames) / 60.0
 	_play_fighter_action(source, action, duration)
 	source.set_meta("attack_active", true)
+	source.set_meta("attack_connected", false)
 	var direction := target.global_position - source.global_position
 	direction.y = 0.0
 	var distance := direction.length()
@@ -2970,6 +4285,7 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		"accent": accent,
 		"lunge_start": lunge_start,
 		"frame_data": frame_data,
+		"clip": attack_clip,
 		"lunge_complete": lunge_distance <= 0.04,
 		"impact_resolved": false,
 		"hit_type": hit_type,
@@ -3016,8 +4332,14 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		arena_root.add_child(orb)
 		orb.global_position = projectile_start
 		orb.look_at(projectile_end, Vector3.UP)
+		var fire_delay := float(frame_data.get("fire_frame", 0.0)) / 60.0
+		if fire_delay > 0.0:
+			orb.visible = false
 		var travel_time := clampf(projectile_start.distance_to(projectile_end) / (22.0 if not bool(move.get("signature", false)) else 27.0), 0.16, 0.58)
 		var projectile_tween := create_tween()
+		if fire_delay > 0.0:
+			projectile_tween.tween_interval(fire_delay)
+			projectile_tween.tween_callback(orb.show)
 		projectile_tween.tween_property(orb, "global_position", projectile_end, travel_time).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
 		projectile_tween.tween_callback(_on_energy_projectile_arrived.bind(orb, source, target, move.duplicate(true), target_was_guarding, damage, stun_damage, is_player, kind, accent, lunge_start, projectile_end, generation))
 		return
@@ -3029,7 +4351,9 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 	motion_tween.tween_property(source, "global_position", lunge_end, lunge_duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	motion_tween.tween_callback(_mark_attack_lunge_complete.bind(source, generation))
 
-func _attack_frame_data(animation: String, move: Dictionary) -> Dictionary:
+func _attack_frame_data(animation: String, move: Dictionary, clip: String = "") -> Dictionary:
+	if not bool(move.get("projectile", false)) and ClipFrameData.has(clip):
+		return ClipFrameData.frame_data(clip)
 	var startup_frames := 4
 	var active_frames := 2
 	var recovery_frames := 10
@@ -3055,11 +4379,13 @@ func _attack_frame_data(animation: String, move: Dictionary) -> Dictionary:
 				startup_frames = 7
 				active_frames = 3
 				recovery_frames = 14
+	var total_frames := startup_frames + active_frames + recovery_frames
 	return {
 		"startup_frames": startup_frames,
 		"active_frames": active_frames,
 		"recovery_frames": recovery_frames,
-		"total_frames": startup_frames + active_frames + recovery_frames
+		"total_frames": total_frames,
+		"fire_frame": ClipFrameData.fire_frame(clip, total_frames) if bool(move.get("projectile", false)) else 0.0
 	}
 
 func _mark_attack_lunge_complete(source: Variant, generation: int) -> void:
@@ -3093,6 +4419,8 @@ func _on_energy_projectile_arrived(orb: Variant, source: Variant, target: Varian
 	state["impact_resolved"] = true
 	state["previous_frame"] = float(state.frame_data.total_frames)
 	source.set_meta("attack_state", state)
+	_spawn_lightning_bolt(orb.global_position, target.global_position, accent, 10, 0.2)
+	_spawn_shell_casing(orb.global_position, -orb.global_basis.z, 2)
 	_resolve_attack_impact(source, target, move, target_was_guarding, damage, stun_damage, is_player, kind, accent, lunge_start)
 
 func _advance_attack_states() -> void:
@@ -3103,7 +4431,7 @@ func _advance_attack_states() -> void:
 		if state.is_empty():
 			continue
 		var frame_data: Dictionary = state.frame_data
-		var frame := float(fighter.get_meta("anim_elapsed", 0.0)) * 60.0
+		var frame := _attack_progress_frames(fighter, state)
 		var impact_frame := float(frame_data.startup_frames)
 		var active_end_frame := impact_frame + float(frame_data.active_frames)
 		var previous_frame := float(state.get("previous_frame", 0.0))
@@ -3139,6 +4467,12 @@ func _advance_attack_states() -> void:
 		if not state.is_empty():
 			state["previous_frame"] = frame
 			fighter.set_meta("attack_state", state)
+		var queued_cancel: Dictionary = fighter.get_meta("pending_attack_move", {})
+		if fighter == player_node and not queued_cancel.is_empty() and _can_cancel_attack(fighter, queued_cancel):
+			fighter.remove_meta("pending_attack_move")
+			_cancel_attack(fighter)
+			call_deferred("_start_buffered_player_move", queued_cancel)
+			continue
 		var action_finished := str(fighter.get_meta("anim_action", "idle")) == "idle"
 		if action_finished or frame >= float(frame_data.total_frames):
 			_activate_hitboxes(fighter, "all", false)
@@ -3149,6 +4483,51 @@ func _advance_attack_states() -> void:
 				fighter.remove_meta("pending_attack_move")
 				if not queued_move.is_empty():
 					call_deferred("_start_buffered_player_move", queued_move)
+
+## Current position inside the attack, in game frames (60 fps). Read from the clip's own playhead so
+## hitboxes, hit-stop freezes and cancels always stay in step with what the player sees.
+func _attack_progress_frames(fighter: Node3D, state: Dictionary) -> float:
+	var frame_data: Dictionary = state.get("frame_data", {})
+	var total := float(frame_data.get("total_frames", 1))
+	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
+	var clip_name := str(state.get("clip", ""))
+	if is_instance_valid(animation_player) and not clip_name.is_empty() \
+			and animation_player.current_animation == clip_name and animation_player.current_animation_length > 0.0:
+		return animation_player.current_animation_position / animation_player.current_animation_length * total
+	return float(fighter.get_meta("anim_elapsed", 0.0)) * 60.0
+
+## 1 light punch, 2 kick, 3 launcher / heavy, 4 special or ultimate.
+func _move_cancel_rank(move: Dictionary) -> int:
+	if bool(move.get("projectile", false)) or str(move.get("kind", "attack")) in ["ultimate", "trap"] or bool(move.get("multi_hit", false)):
+		return 4
+	if bool(move.get("launcher", false)) or str(move.get("animation", "")) == "rising_rush":
+		return 3
+	var attack_type := str(move.get("attack_type", ""))
+	if attack_type == "punch":
+		return 1
+	return 2
+
+## A connected normal can be cancelled into the same or a stronger move while its cancel window is open.
+func _can_cancel_attack(fighter: Node3D, next_move: Dictionary) -> bool:
+	if not bool(fighter.get_meta("attack_active", false)) or not bool(fighter.get_meta("attack_connected", false)):
+		return false
+	var state: Dictionary = fighter.get_meta("attack_state", {})
+	if state.is_empty():
+		return false
+	var frame_data: Dictionary = state.get("frame_data", {})
+	if not frame_data.has("cancel_end_frame"):
+		return false
+	var current_rank := int(frame_data.get("rank", 4))
+	if current_rank >= 4 or _move_cancel_rank(next_move) < current_rank:
+		return false
+	var frame := _attack_progress_frames(fighter, state)
+	return frame >= float(frame_data.cancel_start_frame) and frame <= float(frame_data.cancel_end_frame)
+
+func _cancel_attack(fighter: Node3D) -> void:
+	_activate_hitboxes(fighter, "all", false)
+	fighter.set_meta("attack_active", false)
+	fighter.set_meta("attack_state", {})
+	_show_move_cue(fighter, "CANCEL", Color("#ffd166"))
 
 func _start_buffered_player_move(move: Dictionary) -> void:
 	if match_over or challenge_active or not is_instance_valid(player_node) or not is_instance_valid(enemy_node):
@@ -3173,6 +4552,7 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 			combo_lab.call("record_missed_move")
 		_show_feedback("WHIFF · THE ATTACK DID NOT CONNECT")
 		return
+	source.set_meta("attack_connected", true)
 	if is_player:
 		_record_combo_move(_combo_step_name(move))
 	if is_player:
@@ -3222,23 +4602,41 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 
 	var hit_sound := "hit_heavy" if kind == "ultimate" else ("hit_soft" if target_was_guarding else "hit_medium")
 	_play_sfx(hit_sound, -6.0, 0.06)
-	_play_fighter_action(target, "block_hit" if target_was_guarding else "hit_react", 0.32)
-	var hit_pause := 0.035 if not target_was_guarding else 0.02
+	var attack_clip := str(attack_state.get("clip", ""))
+	var strong_hit := kind == "ultimate" or ClipFrameData.rank(attack_clip) >= 3 or damage >= 18.0
+	var react_clip := "block_hit"
+	if not target_was_guarding:
+		react_clip = "hit_heavy" if kind == "ultimate" else ClipFrameData.react_clip(attack_clip, "hit_heavy" if strong_hit else "hit_light")
+	_play_fighter_action(target, react_clip, 0.55 if react_clip == "hit_heavy" else 0.32)
+
+	# Hit-stop: a short freeze that scales with how hard the move is. Heavier, countered and
+	# killing blows freeze longer; blocked hits freeze less.
+	var stop_frames := ClipFrameData.hitstop_frames(attack_clip)
+	if kind == "ultimate":
+		stop_frames = maxf(stop_frames, ClipFrameData.ULTIMATE_HITSTOP_FRAMES)
+	if target_was_guarding:
+		stop_frames *= 0.6
 	if is_counter_hit:
-		hit_pause *= 2.0
-	_pause_fighter_animation(source, hit_pause)
-	_pause_fighter_animation(target, hit_pause)
-	
-	# Apply Hit Stop for impact feel
+		stop_frames *= 1.5
+	var will_ko := (enemy_hp - damage <= 0.0) if is_player else (player_hp - damage <= 0.0)
+	if will_ko and not resolving_combo_practice:
+		stop_frames = maxf(stop_frames, ClipFrameData.KO_HITSTOP_FRAMES)
+	var stop_seconds := stop_frames / 60.0
 	if hit_stop_controller:
-		var stop_duration := 0.08 if is_counter_hit else 0.05
-		hit_stop_controller.apply_hit_stop(stop_duration)
-	
+		hit_stop_controller.apply_hit_stop(stop_seconds)
+	_hit_shake(target, stop_seconds, 0.015 if target_was_guarding else 0.035)
+
 	var impact_position := source.global_position.lerp(target.global_position, 0.5)
 	_spawn_impact_flash(impact_position, accent, target_was_guarding)
 	camera_shake_strength = maxf(camera_shake_strength, 0.1 if target_was_guarding else (0.35 if is_counter_hit else 0.24))
 	_spawn_damage_number(target, damage, is_counter_hit, target_was_guarding)
 	_spawn_hit_particles(impact_position, accent, target_was_guarding, is_counter_hit)
+	_spawn_weapon_trail(source.global_position, impact_position, accent, 0.8)
+	_spawn_impact_sparks(impact_position, (target.global_position - source.global_position).normalized(), accent, 10 if is_counter_hit else 6)
+	_trigger_anime_hit(impact_position, accent, kind == "ultimate" or damage >= 18.0, is_counter_hit)
+	if is_counter_hit or (kind == "ultimate"):
+		_trigger_silhouette_flash(target, 0.06)
+		_spawn_blood_splatter(impact_position, 10 if is_counter_hit else 6)
 	if is_player:
 		if not resolving_combo_practice:
 			enemy_hp = maxf(0.0, enemy_hp - damage)
@@ -3300,6 +4698,13 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 	var attack_anim := _attack_animation(move)
 	var is_launcher := bool(move.get("launcher", false)) or (attack_anim == "kick" and not target_was_guarding and damage > 20.0)
 	var knockback := 0.12 if target_was_guarding else 0.28 + minf(float(move.get("damage", 8)) * 0.01, 0.42)
+	var authored_knockback := ClipFrameData.knockback(attack_clip, -1.0)
+	if authored_knockback >= 0.0:
+		knockback = authored_knockback * (0.4 if target_was_guarding else 1.0)
+	if is_counter_hit:
+		knockback *= 1.25
+	if kind == "ultimate":
+		knockback *= 1.5
 	var launch_velocity := 0.0
 	if is_launcher and target.position.y <= 0.05:
 		launch_velocity = 8.0 + damage * 0.08
@@ -3309,17 +4714,72 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 		target.set_meta("air_duration", launch_velocity / AIR_GRAVITY * 2.0)
 		target.set_meta("launch_velocity", launch_velocity)
 		target.set_meta("juggle_decay", float(target.get_meta("juggle_decay", 0.0)) + 0.15)
-	var destination := target.global_position + away.normalized() * knockback
+
+	# Downward slam finisher: airborne attacker hits grounded target with heavy/kick
+	var is_airborne_attacker := bool(source.get_meta("airborne", false)) or bool(source.get_meta("flying", false))
+	var is_heavy_aerial := is_airborne_attacker and (attack_anim == "kick" or kind == "ultimate") and target.position.y <= 0.05 and not target_was_guarding
+	if is_heavy_aerial and not resolving_combo_practice:
+		_perform_downward_slam(target, source, accent)
+		# Launch both slightly upward for aerial follow-up window
+		source.set_meta("airborne", true)
+		source.set_meta("air_elapsed", 0.0)
+		source.set_meta("air_gravity", AIR_GRAVITY * 0.7)
+		source.set_meta("launch_velocity", 6.0)
+		source.set_meta("air_duration", 1.6)
+		target.set_meta("airborne", true)
+		target.set_meta("air_elapsed", 0.0)
+		target.set_meta("air_gravity", AIR_GRAVITY)
+		target.set_meta("launch_velocity", 4.0)
+		target.set_meta("air_duration", 1.2)
+
+	var push_direction := away.normalized()
+	var wanted_destination := target.global_position + push_direction * knockback
+	var destination := wanted_destination
 	destination.x = clampf(destination.x, -ARENA_LIMIT, ARENA_LIMIT)
 	destination.z = clampf(destination.z, -ARENA_LIMIT, ARENA_LIMIT)
+	# Whatever the wall swallowed is pushed onto the attacker instead (corner pushback); a blocked
+	# hit also nudges the attacker back a little.
+	var attacker_push := (0.16 if target_was_guarding else 0.0) + wanted_destination.distance_to(destination) * 0.85
 	var reaction := create_tween()
 	reaction.set_parallel()
-	reaction.tween_property(target, "global_position", destination, 0.2).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	reaction.tween_property(target, "global_position", destination, 0.16 + knockback * 0.22).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	reaction.tween_property(target, "scale", Vector3(1.12, 0.9, 1.12), 0.08)
 	reaction.chain().tween_property(target, "scale", Vector3.ONE, 0.22)
+
+	# Kill / final blow sequence: extended freeze, throw body backward, ash burn
+	var will_ko_here := (enemy_hp - damage <= 0.0) if is_player else (player_hp - damage <= 0.0)
+	if will_ko_here and not resolving_combo_practice:
+		_trigger_kill_sequence(target, source, push_direction, accent)
+
+	if attacker_push > 0.01 and is_instance_valid(source):
+		var source_destination := source.global_position - push_direction * attacker_push
+		source_destination.x = clampf(source_destination.x, -ARENA_LIMIT, ARENA_LIMIT)
+		source_destination.z = clampf(source_destination.z, -ARENA_LIMIT, ARENA_LIMIT)
+		var recoil := create_tween()
+		recoil.set_parallel()
+		recoil.tween_property(source, "global_position:x", source_destination.x, 0.18).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		recoil.tween_property(source, "global_position:z", source_destination.z, 0.18).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	if player_hp <= 0.0 or enemy_hp <= 0.0:
 		_end_match(enemy_hp <= 0.0)
 	_update_hud()
+
+## Tiny horizontal tremble on the fighter who was hit, running on real time so it plays during hit-stop.
+func _hit_shake(fighter: Node3D, seconds: float, strength: float) -> void:
+	var rig := fighter.get_node_or_null("Stickman_Rig") as Node3D
+	if not is_instance_valid(rig) or seconds <= 0.0:
+		return
+	if not fighter.has_meta("rig_base_x"):
+		fighter.set_meta("rig_base_x", rig.position.x)
+	var base_x := float(fighter.get_meta("rig_base_x"))
+	var steps := maxi(2, roundi(seconds / 0.02))
+	var shake := create_tween()
+	shake.set_ignore_time_scale(true)
+	shake.set_pause_mode(Tween.TWEEN_PAUSE_PROCESS)
+	for step in range(steps):
+		var fade := 1.0 - float(step) / float(steps)
+		var offset := strength * fade * (1.0 if step % 2 == 0 else -1.0)
+		shake.tween_property(rig, "position:x", base_x + offset, seconds / float(steps))
+	shake.tween_property(rig, "position:x", base_x, 0.0)
 
 func _attack_contact_range(move: Dictionary) -> float:
 	if bool(move.get("projectile", false)):
@@ -3616,11 +5076,25 @@ func _update_camera(delta: float) -> void:
 	var desired_position := center + Vector3(0.0, camera_height, camera_back)
 	camera_shake_phase += delta * 52.0
 	camera_shake_strength = move_toward(camera_shake_strength, 0.0, delta * 1.8)
+
+	# Animate water shader time
+	if water_shader_material:
+		water_shader_material.set_shader_parameter("time", Time.get_ticks_msec() / 1000.0)
+
 	var shake := Vector3(
 		sin(camera_shake_phase * 1.0) * camera_shake_strength,
 		sin(camera_shake_phase * 1.7) * camera_shake_strength * 0.35,
 		sin(camera_shake_phase * 1.3) * camera_shake_strength * 0.2
 	)
+
+	# Dynamic FOV expansion during dash / high speed
+	var speed_factor := player_ground_velocity.length() / maxf(PLAYER_SPEED, 0.001)
+	if player_is_dashing:
+		speed_factor = maxf(speed_factor, 1.5)
+	camera_fov_target = lerp(45.0, 70.0, clampf(speed_factor * 0.4, 0.0, 1.0))
+	camera_fov_current = lerp(camera_fov_current, camera_fov_target, delta * 8.0)
+	camera.fov = camera_fov_current
+
 	var blend := 1.0 - exp(-delta * 5.0)
 	camera.position = camera.position.lerp(desired_position + shake, blend)
 	camera.look_at(center + Vector3(0.0, 0.8, 0.0), Vector3.UP)
