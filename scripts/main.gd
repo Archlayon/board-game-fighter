@@ -5,7 +5,7 @@ const GamesHubScript = preload("res://scripts/games_hub.gd")
 const ComboLabScript = preload("res://scripts/combo_lab.gd")
 const StoryCampaignScript = preload("res://scripts/story_campaign.gd")
 const MainMenuScript = preload("res://scripts/main_menu.gd")
-const FIGHTER_SCENE: PackedScene = preload("res://stickman.glb")
+const FIGHTER_SCENE: PackedScene = preload("res://assets/characters/fighter_ual2.glb")
 # New combat system components
 const MoveDataScript = preload("res://scripts/move_data.gd")
 const FighterCombatScript = preload("res://scripts/fighter_combat.gd")
@@ -3022,6 +3022,7 @@ func _start_match() -> void:
 	if combo_lab_active and is_instance_valid(combo_lab):
 		combo_lab.call("stop_practice")
 	match_over = false
+	Engine.time_scale = 1.0
 	mp_clash_active = false
 	challenge_active = false
 	is_charging = false
@@ -3988,7 +3989,7 @@ func _start_grapple(is_player: bool, holder: Node3D, victim: Node3D) -> void:
 	_play_fighter_action(holder, "grab_hold", GRAPPLE_DURATION + 0.2)
 	_play_fighter_action(victim, "grabbed", GRAPPLE_DURATION + 0.2)
 	_show_feedback("GRAPPLE · PUNCH OR KICK TO THROW · MOVE OR MASH ATTACK TO BREAK FREE")
-	_show_move_cue(victim, "GRABBED", Color("#ffcf70"))
+	# _show_move_cue(victim, "GRABBED", Color("#ffcf70"))
 
 func _update_grapple(delta: float) -> void:
 	if not is_instance_valid(grapple_holder) or not is_instance_valid(grapple_victim):
@@ -4527,7 +4528,7 @@ func _cancel_attack(fighter: Node3D) -> void:
 	_activate_hitboxes(fighter, "all", false)
 	fighter.set_meta("attack_active", false)
 	fighter.set_meta("attack_state", {})
-	_show_move_cue(fighter, "CANCEL", Color("#ffd166"))
+	# _show_move_cue(fighter, "CANCEL", Color("#ffd166"))
 
 func _start_buffered_player_move(move: Dictionary) -> void:
 	if match_over or challenge_active or not is_instance_valid(player_node) or not is_instance_valid(enemy_node):
@@ -4686,7 +4687,7 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 			_show_feedback("STUN BREAK · 3 SECONDS TO RECOVER")
 	_activate_hitboxes(source, "all", false)
 	_update_hp_bars()
-	_show_move_cue(target, str(move.get("cue", move.get("name", "HIT"))), accent)
+	# _show_move_cue(target, str(move.get("cue", move.get("name", "HIT"))), accent)
 	_show_feedback("%s · %d DAMAGE" % [move.get("name", "HIT"), int(damage)])
 	var away := target.global_position - source.global_position
 	away.y = 0.0
@@ -4974,7 +4975,7 @@ func _on_jump() -> void:
 	player_node.set_meta("air_duration", jump_velocity / AIR_GRAVITY * 2.0)
 	enemy_flight_decision_clock = minf(enemy_flight_decision_clock, 1.0)
 	_play_fighter_action(player_node, "jump", JUMP_DURATION)
-	_show_move_cue(player_node, "JUMP", GameData.CHARACTERS[player_character_index].accent)
+	# _show_move_cue(player_node, "JUMP", GameData.CHARACTERS[player_character_index].accent)
 
 func _on_block() -> void:
 	if challenge_active or match_over or player_stun_lock > 0.0:
@@ -4992,7 +4993,7 @@ func _on_block() -> void:
 	player_guard = 12.0 + (6.0 if player_character_index == 8 else 0.0)
 	_play_fighter_action(player_node, "block", 999.0)
 	_show_feedback("BLOCKING · RELEASE TO LOWER GUARD")
-	_show_move_cue(player_node, "BLOCK", GameData.CHARACTERS[player_character_index].accent)
+	# _show_move_cue(player_node, "BLOCK", GameData.CHARACTERS[player_character_index].accent)
 
 func _on_block_released() -> void:
 	player_is_blocking = false
@@ -5515,6 +5516,7 @@ func _leave_training_challenge() -> void:
 
 func _end_match(player_won: bool) -> void:
 	match_over = true
+	Engine.time_scale = 1.0
 	is_charging = false
 	_clear_grapple()
 	_play_fighter_action(enemy_node if player_won else player_node, "knockout", 100000.0)
