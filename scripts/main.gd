@@ -815,7 +815,7 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	if not is_instance_valid(animation_player):
 		push_error("The selected fighter model has no AnimationPlayer.")
 		return root
-	for looping_animation in ["idle", "walk", "run", "charge", "block", "stun", "crouch", "crouch_walk", "fly_idle", "fly_forward", "fly_up", "fly_down"]:
+	for looping_animation in ["idle", "walk", "charge", "block", "stun"]:
 		var animation := animation_player.get_animation(looping_animation)
 		if animation != null:
 			animation.loop_mode = Animation.LOOP_LINEAR
@@ -2653,9 +2653,9 @@ func _set_locomotion(fighter: Node3D, speed: float) -> void:
 		return
 	var animation_name := "idle"
 	if crouch_enabled and fighter == player_node:
-		animation_name = "crouch" if speed <= 0.05 else "crouch_walk"
+		animation_name = "idle"
 	elif speed >= 0.86:
-		animation_name = "run"
+		animation_name = "walk"
 	elif speed > 0.05:
 		animation_name = "walk"
 	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
