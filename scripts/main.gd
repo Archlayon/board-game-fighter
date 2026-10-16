@@ -134,7 +134,7 @@ class SimpleHitBox3D extends Area3D:
 		var hurt_box: SimpleHurtBox3D = area
 		hurt_box_entered.emit(hurt_box)
 		action_applied.emit(hurt_box)
-const WALK_SPEED := 3.0
+const WALK_SPEED := 4.2
 const ARENA_LIMIT := 9.0
 const FIGHTER_CLEARANCE := 1.2
 const GRAPPLE_DURATION := 1.6
@@ -3161,7 +3161,7 @@ func _update_player_movement(delta: float) -> void:
 	var desired_velocity := Vector3.ZERO
 	if input_strength >= 0.05:
 		desired_velocity = Vector3(input_vector.x, 0.0, input_vector.y).normalized() * move_speed * (1.0 if keyboard.length() > 0.1 else input_strength)
-	var acceleration := 34.0 if desired_velocity.length_squared() < player_ground_velocity.length_squared() else 22.0
+	var acceleration := 55.0 if desired_velocity.length_squared() < player_ground_velocity.length_squared() else 40.0
 	player_ground_velocity = player_ground_velocity.move_toward(desired_velocity, acceleration * delta)
 	_move_fighter(player_node, enemy_node, player_ground_velocity * delta)
 	_set_locomotion(player_node, player_ground_velocity.length() / PLAYER_SPEED)
