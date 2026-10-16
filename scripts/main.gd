@@ -815,7 +815,7 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	if not is_instance_valid(animation_player):
 		push_error("The selected fighter model has no AnimationPlayer.")
 		return root
-	for looping_animation in ["idle", "walk", "run", "charge", "crouch", "crouch_walk", "fly_idle", "fly_forward", "fly_up", "fly_down"]:
+	for looping_animation in ["idle", "walk", "run", "charge", "block", "stun", "crouch", "crouch_walk", "fly_idle", "fly_forward", "fly_up", "fly_down"]:
 		var animation := animation_player.get_animation(looping_animation)
 		if animation != null:
 			animation.loop_mode = Animation.LOOP_LINEAR
@@ -1041,7 +1041,7 @@ func _on_combat_challenge_restarted(fighter: Node3D, move: Object) -> void:
 func _on_combat_stunned(fighter: Node3D) -> void:
 	_show_feedback("%s STUNNED!" % fighter.name)
 	fighter.set_meta("attack_active", false)
-	_play_fighter_action(fighter, "hit_react", 2.0)
+	_play_fighter_action(fighter, "stun", 2.0)
 
 func _on_combat_defeated(fighter: Node3D) -> void:
 	_show_feedback("%s DEFEATED!" % fighter.name)
@@ -2772,33 +2772,33 @@ func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> v
 			clip_name = "idle"
 		"punch":
 			var attack_count := int(fighter.get_meta("attack_count", 0))
-			var punch_clips: Array[String] = ["punch_basic", "light_combo_1", "light_combo_2", "heavy_attack", "strike_arts"]
+			var punch_clips: Array[String] = ["jab", "cross", "hook", "uppercut"]
 			clip_name = punch_clips[posmod(attack_count - 1, punch_clips.size())]
 		"kick":
-			var kick_clips: Array[String] = ["kick", "heavy_attack", "strike_arts", "aerial_attack", "rising_rush"]
+			var kick_clips: Array[String] = ["kick_front", "kick_round", "sweep", "kick_flying"]
 			clip_name = kick_clips[posmod(int(fighter.get_meta("attack_count", 1)) - 1, kick_clips.size())]
 		"aerial_kick":
-			clip_name = "aerial_attack"
+			clip_name = "kick_flying"
 		"aerial_punch":
-			clip_name = "aerial_attack"
+			clip_name = "cross"
 		"back_kick":
-			clip_name = "kick"
+			clip_name = "kick_round"
 		"grab":
 			clip_name = "grab"
 		"grab_hold":
 			clip_name = "grab"
 		"grabbed":
-			clip_name = "hit"
+			clip_name = "hit_heavy"
 		"throw":
 			clip_name = "throw"
 		"block":
 			clip_name = "block"
 		"block_hit":
-			clip_name = "hit"
+			clip_name = "block_hit"
 		"charge":
 			clip_name = "charge"
 		"dodge":
-			clip_name = "vanish_step"
+			clip_name = "dodge"
 		"jump":
 			clip_name = "jump"
 		"flight_start":
@@ -2806,20 +2806,20 @@ func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> v
 		"flight_stop":
 			clip_name = "flight_stop"
 		"hit_react":
-			clip_name = "hit"
+			clip_name = "hit_light"
 		"victory":
-			clip_name = "awakened_arts"
+			clip_name = "victory"
 		"knockout":
 			clip_name = "ko"
 		_:
 			clip_name = action.to_lower()
 	if not animation_player.has_animation(clip_name):
 		var fallbacks := {
-			"punch": "punch_basic", "light_combo_1": "punch_basic", "light_combo_2": "punch_basic",
-			"aerial_attack": "kick", "grab": "punch_basic", "vanish_step": "dash_back",
-			"awakened_arts": "ultimate_arts", "special_move": "strike_arts", "beam": "beam_fire",
-			"hadoken": "ki_blast", "tatsumaki": "strike_arts", "shoryuken": "rising_rush",
-			"hadoken_kick": "beam_fire", "light_combo": "light_combo_1", "hit_heavy": "knockback",
+			"punch": "jab", "light_combo_1": "jab", "light_combo_2": "cross", "light_combo": "jab",
+			"aerial_attack": "kick_flying", "vanish_step": "dodge", "dash_back": "dodge",
+			"awakened_arts": "victory", "special_move": "hadoken", "ki_blast": "hadoken", "beam": "hadoken",
+			"beam_fire": "hadoken", "hadoken_kick": "hadoken", "strike_arts": "kick_round", "rising_rush": "shoryuken",
+			"kick": "kick_front", "heavy_attack": "hook", "hit": "hit_light", "knockback": "hit_heavy",
 		}
 		clip_name = str(fallbacks.get(clip_name, "idle"))
 		if not animation_player.has_animation(clip_name):

@@ -163,7 +163,7 @@ static func legends_arts(signature: String, unlocked_ultimates: int = 1, style: 
 	]
 	var ultimate_names: Array = ULTIMATE_NAMES.get(style, ULTIMATE_NAMES["Chess"])
 	for index in range(ultimate_names.size()):
-		var ultimate_name := ultimate_names[index]
+		var ultimate_name: String = ultimate_names[index]
 		result.append({
 			"name": ultimate_name,
 			"kind": "ultimate",
