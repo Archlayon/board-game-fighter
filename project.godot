@@ -193,3 +193,18 @@ textures/vram_compression/import_etc2_astc=true
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 environment/defaults/default_clear_color=Color(0.035, 0.055, 0.07, 1)
+
+# Mobile optimizations for mid-range devices (Redmi Note 14 etc.)
+rendering/quality/default/texture_filter_default_filter=0
+rendering/quality/default/texture_filter_default_anisotropic_max=1
+rendering/quality/default/multi_sample=0
+rendering/quality/driver/low_end_device_safemode=true
+rendering/quality/drivers/opengl3/roughness_limit_roughness=false
+rendering/quality/drivers/opengl3/use_physical_light_attenuator=false
+
+[mobile]
+target_fps=30
+physics_fps=30
+low_end_device=true
+render_scale=0.75
+msaa_disabled=true

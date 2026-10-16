@@ -300,6 +300,18 @@ var camera_shake_strength := 0.0
 var camera_shake_phase := 0.0
 
 func _ready() -> void:
+	# Mobile / low-end device optimizations
+	var is_mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
+	Engine.time_scale = 1.0
+	if is_mobile:
+		ProjectSettings.set_setting("display/window/vsync/vsync_mode", 0)
+		ProjectSettings.set_setting("rendering/quality/driver/low_end_device_safemode", true)
+		ProjectSettings.set_setting("rendering/quality/default/texture_filter_default_filter", 0)
+		ProjectSettings.set_setting("rendering/quality/default/multi_sample", 0)
+		get_viewport().set_size_override(true, Vector2i(960, 540))
+		get_viewport().set_size_override_stretch(true)
+		_show_feedback("MOBILE MODE · 30 FPS · 960x540 · LOW-END SAFE")
+
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	rng.randomize()
 	_load_progress()
@@ -750,7 +762,7 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	var outline_material := ShaderMaterial.new()
 	outline_material.shader = outline_shader
 	outline_material.set_shader_parameter("outline_color", Color("#17151d"))
-	outline_material.set_shader_parameter("outline_width_pixels", 2.5)
+	outline_material.set_shader_parameter("outline_width_pixels", 1.2 if OS.get_name() == "Android" or OS.get_name() == "iOS" else 2.5)
 	body_material.next_pass = outline_material
 	for body_mesh in root.find_children("*", "MeshInstance3D", true, false):
 		(body_mesh as MeshInstance3D).material_override = body_material
