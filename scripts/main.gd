@@ -322,6 +322,9 @@ var water_shader_material: ShaderMaterial
 var camera_fov_target := 45.0
 var camera_fov_current := 45.0
 
+# Safeguard: never let hit-stop / time_scale stay frozen at 0 for too long
+var time_scale_stuck_timer := 0.0
+
 func _ready() -> void:
 	# Mobile / low-end device optimizations
 	var is_mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
@@ -350,6 +353,15 @@ func _play_sfx(sound_name: String, volume_db := -8.0, pitch_variation := 0.0) ->
 	get_node("/root/GameAudio").call("play_sfx", sound_name, volume_db, pitch_variation)
 
 func _process(delta: float) -> void:
+	# Safeguard: restore time_scale if hit-stop left it frozen
+	if Engine.time_scale <= 0.0:
+		time_scale_stuck_timer += delta
+		if time_scale_stuck_timer > 1.0:
+			Engine.time_scale = 1.0
+			time_scale_stuck_timer = 0.0
+	else:
+		time_scale_stuck_timer = 0.0
+
 	if main_menu_open or pause_menu_open:
 		_handle_debug_input()
 		return
@@ -2088,7 +2100,7 @@ func _on_player_dodged(direction: Vector2) -> void:
 		combat.invincible = true
 		_play_fighter_action(player_node, "dodge", 0.42)
 		_show_feedback("DODGE!")
-		await get_tree().create_timer(0.25).timeout
+		await get_tree().create_timer(0.25, true, false, true).timeout
 		if is_instance_valid(combat):
 			combat.invincible = false
 
