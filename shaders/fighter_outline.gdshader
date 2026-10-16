@@ -1,11 +1,9 @@
 shader_type spatial;
 
-// Screen-space outline expansion technique adapted from eldskald/godot4-cel-shader.
-// Copyright (c) 2023 Rafael de Lima Bordoni. See assets/licenses/eldskald-cel-shader-MIT.txt.
 render_mode unshaded, cull_front, depth_draw_never;
 
-uniform vec4 outline_color : source_color = vec4(0.035, 0.025, 0.04, 1.0);
-uniform float outline_width_pixels = 1.5;
+uniform vec4 outline_color = vec4(0.035, 0.025, 0.04, 1.0);
+uniform float outline_width_pixels = 1.0;
 
 void vertex() {
 	vec4 mv_position = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);

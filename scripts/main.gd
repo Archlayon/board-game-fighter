@@ -308,9 +308,7 @@ func _ready() -> void:
 		ProjectSettings.set_setting("rendering/quality/driver/low_end_device_safemode", true)
 		ProjectSettings.set_setting("rendering/quality/default/texture_filter_default_filter", 0)
 		ProjectSettings.set_setting("rendering/quality/default/multi_sample", 0)
-		get_viewport().set_size_override(true, Vector2i(960, 540))
-		get_viewport().set_size_override_stretch(true)
-		_show_feedback("MOBILE MODE · 30 FPS · 960x540 · LOW-END SAFE")
+		_show_feedback("MOBILE MODE · 30 FPS · LOW-END SAFE")
 
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	rng.randomize()
