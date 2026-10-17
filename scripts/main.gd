@@ -136,7 +136,7 @@ class SimpleHitBox3D extends Area3D:
 		action_applied.emit(hurt_box)
 const WALK_SPEED := 4.2
 const ARENA_LIMIT := 9.0
-const FIGHTER_CLEARANCE := 1.2
+const FIGHTER_CLEARANCE := 0.9
 const GRAPPLE_DURATION := 1.6
 const GRAPPLE_ESCAPE_THRESHOLD := 1.0
 const JUMP_DURATION := 0.9
@@ -704,9 +704,9 @@ func _spawn_anime_burst_lines(position: Vector3, color: Color, line_count: int =
 		cyl.height = rng.randf_range(0.6, 1.2)
 		seg.mesh = cyl
 		seg.material_override = material
+		lines.add_child(seg)
 		seg.look_at(position + dir * cyl.height, Vector3.UP)
 		seg.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
-		lines.add_child(seg)
 
 	var light := OmniLight3D.new()
 	light.light_color = color
@@ -3314,9 +3314,9 @@ func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> v
 		var angle := TAU * float(i) / 6.0
 		var side := Vector3(cos(angle), 0.0, sin(angle)) * rng.randf_range(0.4, 1.0)
 		seg.global_position = mid + side
+		lines.add_child(seg)
 		seg.look_at(mid + dir * 2.0, Vector3.UP)
 		seg.rotate_object_local(Vector3.RIGHT, PI / 2.0)
-		lines.add_child(seg)
 	var light := OmniLight3D.new()
 	light.light_color = color
 	light.light_energy = 3.0
@@ -3353,9 +3353,9 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 	cyl1.height = start_pos.distance_to(mid)
 	seg1.mesh = cyl1
 	seg1.material_override = material
+	trail.add_child(seg1)
 	seg1.look_at(mid, Vector3.UP)
 	seg1.translate(Vector3(0.0, -cyl1.height * 0.5, 0.0))
-	trail.add_child(seg1)
 	var seg2 := MeshInstance3D.new()
 	var cyl2 := CylinderMesh.new()
 	cyl2.top_radius = 0.02
@@ -3363,9 +3363,9 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 	cyl2.height = mid.distance_to(end_pos)
 	seg2.mesh = cyl2
 	seg2.material_override = material
+	trail.add_child(seg2)
 	seg2.look_at(end_pos, Vector3.UP)
 	seg2.translate(Vector3(0.0, -cyl2.height * 0.5, 0.0))
-	trail.add_child(seg2)
 	var light := OmniLight3D.new()
 	light.light_color = color
 	light.light_energy = 4.0
