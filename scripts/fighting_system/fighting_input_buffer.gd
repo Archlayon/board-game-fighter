@@ -50,16 +50,28 @@ func _physics_process(_delta: float) -> void:
         
     _check_special_moves(current_frame)
 
+func _action_held(primary: String, fallback: String = "") -> bool:
+    if InputMap.has_action(primary) and Input.is_action_pressed(primary):
+        return true
+    return not fallback.is_empty() and InputMap.has_action(fallback) and Input.is_action_pressed(fallback)
+
+func _action_tapped(primary: String, fallback: String = "") -> bool:
+    if InputMap.has_action(primary) and Input.is_action_just_pressed(primary):
+        return true
+    return not fallback.is_empty() and InputMap.has_action(fallback) and Input.is_action_just_pressed(fallback)
+
 func _read_hardware_inputs() -> int:
     var mask = 0
-    if Input.is_action_pressed("fight_up"): mask |= Buttons.UP
-    if Input.is_action_pressed("fight_down"): mask |= Buttons.DOWN
-    if Input.is_action_pressed("fight_left"): mask |= Buttons.LEFT
-    if Input.is_action_pressed("fight_right"): mask |= Buttons.RIGHT
-    if Input.is_action_just_pressed("fight_lp"): mask |= Buttons.LIGHT_PUNCH
-    if Input.is_action_just_pressed("fight_hp"): mask |= Buttons.HEAVY_PUNCH
-    if Input.is_action_just_pressed("fight_lk"): mask |= Buttons.LIGHT_KICK
-    if Input.is_action_just_pressed("fight_hk"): mask |= Buttons.HEAVY_KICK
+    # Prefer fight_* bindings; fall back to the gameplay move/attack map so buffering
+    # still works when only keyboard WASD + J/K are bound.
+    if _action_held("fight_up", "move_forward"): mask |= Buttons.UP
+    if _action_held("fight_down", "move_back"): mask |= Buttons.DOWN
+    if _action_held("fight_left", "move_left"): mask |= Buttons.LEFT
+    if _action_held("fight_right", "move_right"): mask |= Buttons.RIGHT
+    if _action_tapped("fight_lp", "attack_punch"): mask |= Buttons.LIGHT_PUNCH
+    if _action_tapped("fight_hp", "attack_uppercut"): mask |= Buttons.HEAVY_PUNCH
+    if _action_tapped("fight_lk", "attack_kick"): mask |= Buttons.LIGHT_KICK
+    if _action_tapped("fight_hk", "attack_grab"): mask |= Buttons.HEAVY_KICK
     return mask
 
 func _check_special_moves(frame_now: int) -> void:

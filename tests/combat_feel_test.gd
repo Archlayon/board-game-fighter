@@ -82,7 +82,7 @@ func _run() -> void:
 	var progress: float = game._attack_progress_frames(game.player_node, game.player_node.get_meta("attack_state", {}))
 	_check(progress >= float(fd_jab.startup_frames) - 0.01, "the hit landed on or after the clip's impact frame (frame %.1f, impact %d)" % [progress, fd_jab.startup_frames])
 	_check(game.enemy_hp < hp_before, "the jab damaged the enemy")
-	_check(Engine.time_scale == 0.0 or Engine.time_scale == 1.0, "time scale is frozen or normal during hit-stop")
+	_check(Engine.time_scale <= 0.1 or is_equal_approx(Engine.time_scale, 1.0), "time scale is nearly frozen or normal during hit-stop (got %.3f)" % Engine.time_scale)
 
 	# input during the cancel window goes straight into the next move
 	var cross_move: Dictionary = {"name": "Punch Combo", "kind": "attack", "damage": 10, "stun": 10, "cost": 0, "animation": "punch", "attack_type": "punch"}

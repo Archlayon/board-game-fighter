@@ -16,16 +16,17 @@ extends RefCounted
 ##   react       - clip the defender plays when hit
 
 const DATA := {
-	"jab": {"clip_frames": 14, "impact": 4, "active_end": 6, "game_frames": 20, "cancel_end": 11, "rank": 1, "hitstop": 4, "knockback": 0.30, "react": "hit_light"},
-	"cross": {"clip_frames": 18, "impact": 6, "active_end": 9, "game_frames": 26, "cancel_end": 14, "rank": 1, "hitstop": 5, "knockback": 0.40, "react": "hit_light"},
-	"hook": {"clip_frames": 20, "impact": 7, "active_end": 10, "game_frames": 30, "cancel_end": 16, "rank": 2, "hitstop": 6, "knockback": 0.55, "react": "hit_heavy"},
-	"uppercut": {"clip_frames": 22, "impact": 9, "active_end": 12, "game_frames": 32, "cancel_end": 17, "rank": 3, "hitstop": 8, "knockback": 0.50, "react": "hit_heavy"},
-	"kick_front": {"clip_frames": 22, "impact": 7, "active_end": 11, "game_frames": 30, "cancel_end": 17, "rank": 2, "hitstop": 6, "knockback": 0.50, "react": "hit_light"},
-	"kick_round": {"clip_frames": 26, "impact": 9, "active_end": 13, "game_frames": 36, "cancel_end": 20, "rank": 3, "hitstop": 8, "knockback": 0.70, "react": "hit_heavy"},
-	"sweep": {"clip_frames": 26, "impact": 9, "active_end": 13, "game_frames": 38, "cancel_end": 21, "rank": 3, "hitstop": 7, "knockback": 0.45, "react": "hit_heavy"},
-	"kick_flying": {"clip_frames": 27, "impact": 11, "active_end": 15, "game_frames": 40, "cancel_end": 22, "rank": 3, "hitstop": 8, "knockback": 0.65, "react": "hit_heavy"},
-	"shoryuken": {"clip_frames": 30, "impact": 8, "active_end": 14, "game_frames": 44, "cancel_end": 8, "rank": 4, "hitstop": 10, "knockback": 0.60, "react": "hit_heavy"},
-	"tatsumaki": {"clip_frames": 40, "impact": 6, "active_end": 32, "game_frames": 56, "cancel_end": 6, "rank": 4, "hitstop": 7, "knockback": 0.55, "react": "hit_heavy"},
+	# cancel_end is intentionally generous so buffered follow-ups land during recovery.
+	"jab": {"clip_frames": 14, "impact": 4, "active_end": 6, "game_frames": 20, "cancel_end": 16, "rank": 1, "hitstop": 3, "knockback": 0.28, "react": "hit_light"},
+	"cross": {"clip_frames": 18, "impact": 6, "active_end": 9, "game_frames": 26, "cancel_end": 20, "rank": 1, "hitstop": 4, "knockback": 0.38, "react": "hit_light"},
+	"hook": {"clip_frames": 20, "impact": 7, "active_end": 10, "game_frames": 30, "cancel_end": 22, "rank": 2, "hitstop": 5, "knockback": 0.52, "react": "hit_heavy"},
+	"uppercut": {"clip_frames": 22, "impact": 9, "active_end": 12, "game_frames": 32, "cancel_end": 20, "rank": 3, "hitstop": 7, "knockback": 0.48, "react": "hit_heavy"},
+	"kick_front": {"clip_frames": 22, "impact": 7, "active_end": 11, "game_frames": 30, "cancel_end": 22, "rank": 2, "hitstop": 5, "knockback": 0.48, "react": "hit_light"},
+	"kick_round": {"clip_frames": 26, "impact": 9, "active_end": 13, "game_frames": 36, "cancel_end": 26, "rank": 3, "hitstop": 7, "knockback": 0.68, "react": "hit_heavy"},
+	"sweep": {"clip_frames": 26, "impact": 9, "active_end": 13, "game_frames": 38, "cancel_end": 26, "rank": 3, "hitstop": 6, "knockback": 0.42, "react": "hit_heavy"},
+	"kick_flying": {"clip_frames": 27, "impact": 11, "active_end": 15, "game_frames": 40, "cancel_end": 28, "rank": 3, "hitstop": 7, "knockback": 0.62, "react": "hit_heavy"},
+	"shoryuken": {"clip_frames": 30, "impact": 8, "active_end": 14, "game_frames": 44, "cancel_end": 10, "rank": 4, "hitstop": 9, "knockback": 0.58, "react": "hit_heavy"},
+	"tatsumaki": {"clip_frames": 40, "impact": 6, "active_end": 32, "game_frames": 56, "cancel_end": 8, "rank": 4, "hitstop": 6, "knockback": 0.52, "react": "hit_heavy"},
 }
 
 ## Projectile clips: the energy ball leaves the hands on the "fire" frame instead of at frame 0.

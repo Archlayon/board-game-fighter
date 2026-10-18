@@ -216,6 +216,10 @@ var player_dash_timer := 0.0
 var player_dash_cooldown := 0.0
 var player_is_dashing := false
 var player_dash_direction := Vector3.ZERO
+var enemy_dash_timer := 0.0
+var enemy_dash_cooldown := 0.0
+var enemy_is_dashing := false
+var enemy_dash_direction := Vector3.ZERO
 var ai_difficulty := "Normal"
 var pause_menu_open := false
 var ai_defense_clock := 0.0
@@ -322,8 +326,8 @@ var water_shader_material: ShaderMaterial
 var camera_fov_target := 45.0
 var camera_fov_current := 45.0
 
-# Safeguard: never let hit-stop / time_scale stay frozen at 0 for too long
-var time_scale_stuck_timer := 0.0
+# Safeguard: never let hit-stop / time_scale stay frozen (real-time, not delta)
+var time_scale_stuck_started_msec := -1
 
 func _ready() -> void:
 	# Mobile / low-end device optimizations
@@ -353,14 +357,19 @@ func _play_sfx(sound_name: String, volume_db := -8.0, pitch_variation := 0.0) ->
 	get_node("/root/GameAudio").call("play_sfx", sound_name, volume_db, pitch_variation)
 
 func _process(delta: float) -> void:
-	# Safeguard: restore time_scale if hit-stop left it frozen
-	if Engine.time_scale <= 0.0:
-		time_scale_stuck_timer += delta
-		if time_scale_stuck_timer > 1.0:
-			Engine.time_scale = 1.0
-			time_scale_stuck_timer = 0.0
+	# Safeguard: restore time_scale if hit-stop left it frozen.
+	# Must use real clock — when time_scale is ~0, delta is also ~0 so a delta timer never fires.
+	if Engine.time_scale < 0.2:
+		if time_scale_stuck_started_msec < 0:
+			time_scale_stuck_started_msec = Time.get_ticks_msec()
+		elif Time.get_ticks_msec() - time_scale_stuck_started_msec > 450:
+			if hit_stop_controller and hit_stop_controller.has_method("force_restore"):
+				hit_stop_controller.force_restore()
+			else:
+				Engine.time_scale = 1.0
+			time_scale_stuck_started_msec = -1
 	else:
-		time_scale_stuck_timer = 0.0
+		time_scale_stuck_started_msec = -1
 
 	if main_menu_open or pause_menu_open:
 		_handle_debug_input()
@@ -752,7 +761,7 @@ func _trigger_negative_flash(duration: float = 0.06) -> void:
 		get_tree().get_root().add_child(invert)
 	var tween := create_tween()
 	tween.tween_property(invert, "modulate:a", 0.0, duration * 0.5).set_trans(Tween.TRANS_LINEAR)
-	tween.chained().tween_callback(func(): _negative_flash_active = false)
+	tween.chain().tween_callback(func(): _negative_flash_active = false)
 	tween.chain().tween_callback(invert.queue_free)
 
 # 🗡️ FULL ANIME HIT SEQUENCE (hit-stop + burst lines + camera punch-in + negative flash)
@@ -1426,7 +1435,7 @@ func _trigger_sonic_domain(source: Node3D, target: Node3D, move: Dictionary, acc
 
 	var dtween := create_tween()
 	dtween.tween_property(dome, "scale", Vector3.ONE * max_radius, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	dtween.chained().tween_callback(func():
+	dtween.chain().tween_callback(func():
 		# Sustained field: periodic status ticks
 		var tick_time := 0.0
 		var tick_conn := get_tree().create_timer(0.5, true, false, true)
@@ -2367,11 +2376,9 @@ func _init_fighting_systems() -> void:
 func _on_special_move_detected(move_name: String, button: int) -> void:
 	if match_over or challenge_active or not is_instance_valid(player_node):
 		return
-	if bool(player_node.get_meta("attack_active", false)):
-		return
 	if bool(player_node.get_meta("airborne", false)):
 		return
-	if player_recovery > 0.0:
+	if player_stun_lock > 0.0:
 		return
 	
 	var move: Dictionary
@@ -2381,12 +2388,15 @@ func _on_special_move_detected(move_name: String, button: int) -> void:
 		"tatsumaki":
 			move = {"name": "Tatsumaki", "kind": "ultimate", "damage": 24, "stun": 18, "cost": 2, "animation": "tatsumaki", "multi_hit": 3}
 		"shoryuken":
-			move = {"name": "Shoryuken", "kind": "ultimate", "damage": 32, "stun": 25, "cost": 3, "animation": "shoryuken", "invincible_startup": true}
+			move = {"name": "Shoryuken", "kind": "ultimate", "damage": 32, "stun": 25, "cost": 3, "animation": "shoryuken", "invincible_startup": true, "launcher": true}
 		"hadoken_kick":
 			move = {"name": "Hadoken Kick", "kind": "ultimate", "damage": 26, "stun": 18, "cost": 2, "animation": "hadoken_kick", "projectile": true}
 		_:
 			return
-	
+	# Buffer specials during an existing string instead of dropping the input.
+	if bool(player_node.get_meta("attack_active", false)):
+		player_node.set_meta("pending_attack_move", move.duplicate(true))
+		return
 	_apply_move(true, move, player_node.global_position.distance_to(enemy_node.global_position))
 
 func _update_fighter_state_machines(delta: float) -> void:
@@ -3088,6 +3098,20 @@ func _start_match() -> void:
 	ai_defense_clock = 0.0
 	enemy_guard_timer = 0.0
 	mp_clash_cooldown = 0.0
+	player_is_dashing = false
+	player_dash_timer = 0.0
+	player_dash_cooldown = 0.0
+	player_dash_direction = Vector3.ZERO
+	player_ground_velocity = Vector3.ZERO
+	enemy_is_dashing = false
+	enemy_dash_timer = 0.0
+	enemy_dash_cooldown = 0.0
+	enemy_dash_direction = Vector3.ZERO
+	if hit_stop_controller and hit_stop_controller.has_method("force_restore"):
+		hit_stop_controller.force_restore()
+	else:
+		Engine.time_scale = 1.0
+	time_scale_stuck_started_msec = -1
 	_build_fighters()
 	_set_locomotion(player_node, 0.0)
 	_set_locomotion(enemy_node, 0.0)
@@ -3161,7 +3185,8 @@ func _update_player_movement(delta: float) -> void:
 	var desired_velocity := Vector3.ZERO
 	if input_strength >= 0.05:
 		desired_velocity = Vector3(input_vector.x, 0.0, input_vector.y).normalized() * move_speed * (1.0 if keyboard.length() > 0.1 else input_strength)
-	var acceleration := 55.0 if desired_velocity.length_squared() < player_ground_velocity.length_squared() else 40.0
+	# Snappy accel / sharper braking so walks don't feel floaty after hit-stop.
+	var acceleration := 70.0 if desired_velocity.length_squared() < player_ground_velocity.length_squared() else 52.0
 	player_ground_velocity = player_ground_velocity.move_toward(desired_velocity, acceleration * delta)
 	_move_fighter(player_node, enemy_node, player_ground_velocity * delta)
 	_set_locomotion(player_node, player_ground_velocity.length() / PLAYER_SPEED)
@@ -3255,46 +3280,74 @@ func _on_flight_button_down() -> void:
 func _on_flight_button_up() -> void:
 	_set_flight_vertical_input(true, false)
 
-# ⚡ LOW-STANCE DASH / FLASH STEP
+# ⚡ LOW-STANCE DASH / FLASH STEP (player wrapper)
 func _perform_dash(direction: Vector3) -> void:
-	if player_is_dashing or player_dash_cooldown > 0.0 or stun_lock > 0.0 or challenge_active:
-		return
-	if bool(player_node.get_meta("attack_active", false)) and not bool(player_node.get_meta("airborne", false)):
-		return
-	player_is_dashing = true
-	player_dash_timer = DASH_DURATION
-	player_dash_cooldown = DASH_COOLDOWN
-	player_dash_direction = direction.normalized()
-	var is_air := bool(player_node.get_meta("airborne", false)) or bool(player_node.get_meta("flying", false))
-	var dash_speed := AIR_DASH_SPEED if is_air else DASH_SPEED
-	var dash_distance := dash_speed * DASH_DURATION
-	var end_pos := player_node.global_position + player_dash_direction * dash_distance
-	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
-	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
-	if is_air:
-		end_pos.y = clampf(end_pos.y, 0.0, 6.0)
-	else:
-		end_pos.y = player_node.position.y
-	# Speed lines / wind trail
-	_spawn_speed_lines(player_node.global_position, end_pos, GameData.CHARACTERS[player_character_index].accent)
-	# Low stance / silhouette trail
-	_play_fighter_action(player_node, "dash", DASH_DURATION)
-	var tween := create_tween()
-	tween.tween_property(player_node, "global_position", end_pos, DASH_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tween.chain().tween_callback(func(): _end_dash())
+	_perform_fighter_dash(player_node, direction, false)
 
 func _end_dash() -> void:
 	player_is_dashing = false
 	player_dash_timer = 0.0
 
+func _end_enemy_dash() -> void:
+	enemy_is_dashing = false
+	enemy_dash_timer = 0.0
+
+## Frame-step dash used by both fighters. Avoids tweening position (which double-moved
+## with the per-frame dash integrator and skipped clearance).
+func _perform_fighter_dash(fighter: Node3D, direction: Vector3, force_air: bool = false) -> void:
+	if not is_instance_valid(fighter) or challenge_active or match_over:
+		return
+	var is_player := fighter == player_node
+	if is_player:
+		if player_is_dashing or player_dash_cooldown > 0.0 or stun_lock > 0.0 or player_stun_lock > 0.0:
+			return
+		if bool(fighter.get_meta("attack_active", false)) and not bool(fighter.get_meta("airborne", false)):
+			return
+	else:
+		if enemy_is_dashing or enemy_dash_cooldown > 0.0 or enemy_stun_lock > 0.0:
+			return
+		if bool(fighter.get_meta("attack_active", false)) and not bool(fighter.get_meta("airborne", false)):
+			return
+	var dash_dir := direction
+	dash_dir.y = 0.0
+	if dash_dir.length_squared() < 0.0001:
+		dash_dir = -fighter.global_basis.z
+		dash_dir.y = 0.0
+	dash_dir = dash_dir.normalized()
+	var is_air := force_air or bool(fighter.get_meta("airborne", false)) or bool(fighter.get_meta("flying", false))
+	var dash_speed := AIR_DASH_SPEED if is_air else DASH_SPEED
+	var start_pos := fighter.global_position
+	var end_pos := start_pos + dash_dir * (dash_speed * DASH_DURATION)
+	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
+	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
+	end_pos.y = clampf(end_pos.y, 0.0, 6.0) if is_air else start_pos.y
+	var accent: Color = GameData.CHARACTERS[player_character_index if is_player else opponent_character_index].accent
+	_spawn_speed_lines(start_pos, end_pos, accent)
+	_play_fighter_action(fighter, "dash", DASH_DURATION)
+	if is_player:
+		player_is_dashing = true
+		player_dash_timer = DASH_DURATION
+		player_dash_cooldown = DASH_COOLDOWN
+		player_dash_direction = dash_dir
+	else:
+		enemy_is_dashing = true
+		enemy_dash_timer = DASH_DURATION
+		enemy_dash_cooldown = DASH_COOLDOWN
+		enemy_dash_direction = dash_dir
+
 # ⚡ SPEED LINES / WIND TRAIL (radiates past camera during high speed)
 func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> void:
+	if not is_instance_valid(arena_root):
+		return
+	var travel := end_pos - start_pos
+	if travel.length_squared() < 0.0001:
+		travel = Vector3.FORWARD
+	var dir := travel.normalized()
+	var distance := start_pos.distance_to(end_pos)
+	var mid := start_pos + dir * distance * 0.5
 	var lines := Node3D.new()
 	lines.name = "SpeedLines"
 	arena_root.add_child(lines)
-	var dir := (end_pos - start_pos).normalized()
-	var distance := start_pos.distance_to(end_pos)
-	var mid := start_pos + dir * distance * 0.5
 	lines.global_position = mid
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -3313,10 +3366,12 @@ func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> v
 		seg.material_override = material
 		var angle := TAU * float(i) / 6.0
 		var side := Vector3(cos(angle), 0.0, sin(angle)) * rng.randf_range(0.4, 1.0)
-		seg.global_position = mid + side
 		lines.add_child(seg)
-		seg.look_at(mid + dir * 2.0, Vector3.UP)
-		seg.rotate_object_local(Vector3.RIGHT, PI / 2.0)
+		seg.position = side
+		var look_target := mid + dir * 2.0
+		if seg.global_position.distance_squared_to(look_target) > 0.0001:
+			seg.look_at(look_target, Vector3.UP)
+			seg.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 	var light := OmniLight3D.new()
 	light.light_color = color
 	light.light_energy = 3.0
@@ -3324,6 +3379,7 @@ func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> v
 	light.shadow_enabled = false
 	lines.add_child(light)
 	var tween := create_tween()
+	tween.set_parallel(true)
 	tween.tween_property(material, "albedo_color:a", 0.0, 0.25)
 	tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.25)
 	tween.tween_property(light, "light_energy", 0.0, 0.25)
@@ -3332,8 +3388,10 @@ func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> v
 # 🗡️ WEAPON SLASH TRAIL (crescent arc following blade tip)
 var _slash_trail_active := false
 func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc_height: float = 0.8) -> void:
-	if _slash_trail_active:
+	if _slash_trail_active or not is_instance_valid(arena_root):
 		return
+	if start_pos.distance_squared_to(end_pos) < 0.0001:
+		end_pos = start_pos + Vector3.FORWARD * 0.35
 	_slash_trail_active = true
 	var trail := Node3D.new()
 	trail.name = "WeaponTrail"
@@ -3345,27 +3403,31 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 	material.emission_enabled = true
 	material.emission = color
 	material.emission_energy_multiplier = 4.0
-	var mid := start_pos + (end_pos - start_pos) * 0.5 + Vector3.UP * arc_height
+	var mid := start_pos.lerp(end_pos, 0.5) + Vector3.UP * arc_height
 	var seg1 := MeshInstance3D.new()
 	var cyl1 := CylinderMesh.new()
 	cyl1.top_radius = 0.06
 	cyl1.bottom_radius = 0.02
-	cyl1.height = start_pos.distance_to(mid)
+	cyl1.height = maxf(0.05, start_pos.distance_to(mid))
 	seg1.mesh = cyl1
 	seg1.material_override = material
 	trail.add_child(seg1)
-	seg1.look_at(mid, Vector3.UP)
-	seg1.translate(Vector3(0.0, -cyl1.height * 0.5, 0.0))
+	seg1.global_position = start_pos.lerp(mid, 0.5)
+	if seg1.global_position.distance_squared_to(mid) > 0.0001:
+		seg1.look_at(mid, Vector3.UP)
+		seg1.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 	var seg2 := MeshInstance3D.new()
 	var cyl2 := CylinderMesh.new()
 	cyl2.top_radius = 0.02
 	cyl2.bottom_radius = 0.06
-	cyl2.height = mid.distance_to(end_pos)
+	cyl2.height = maxf(0.05, mid.distance_to(end_pos))
 	seg2.mesh = cyl2
 	seg2.material_override = material
 	trail.add_child(seg2)
-	seg2.look_at(end_pos, Vector3.UP)
-	seg2.translate(Vector3(0.0, -cyl2.height * 0.5, 0.0))
+	seg2.global_position = mid.lerp(end_pos, 0.5)
+	if seg2.global_position.distance_squared_to(end_pos) > 0.0001:
+		seg2.look_at(end_pos, Vector3.UP)
+		seg2.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 	var light := OmniLight3D.new()
 	light.light_color = color
 	light.light_energy = 4.0
@@ -3373,14 +3435,17 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 	light.shadow_enabled = false
 	trail.add_child(light)
 	var tween := create_tween()
+	tween.set_parallel(true)
 	tween.tween_property(material, "albedo_color:a", 0.0, 0.15)
 	tween.tween_property(material, "emission_energy_multiplier", 0.0, 0.15)
 	tween.tween_property(light, "light_energy", 0.0, 0.15)
-	tween.chained().tween_callback(func(): _slash_trail_active = false)
+	tween.chain().tween_callback(func(): _slash_trail_active = false)
 	tween.chain().tween_callback(trail.queue_free)
 
 # 💥 DIRECTIONAL IMPACT SPARKS (from collision contact point)
 func _spawn_impact_sparks(position: Vector3, normal: Vector3, color: Color, count: int = 12) -> void:
+	if not is_instance_valid(arena_root):
+		return
 	var particles := GPUParticles3D.new()
 	particles.name = "ImpactSparks"
 	particles.emitting = true
@@ -3393,7 +3458,10 @@ func _spawn_impact_sparks(position: Vector3, normal: Vector3, color: Color, coun
 	pmat.gravity = Vector3(0.0, -8.0, 0.0)
 	pmat.initial_velocity_min = 4.0
 	pmat.initial_velocity_max = 8.0
-	pmat.velocity_dir = normal
+	var spark_dir := normal
+	if spark_dir.length_squared() < 0.0001:
+		spark_dir = Vector3.UP
+	pmat.direction = spark_dir.normalized()
 	pmat.spread = 45.0
 	pmat.scale_min = 0.04
 	pmat.scale_max = 0.12
@@ -3411,27 +3479,13 @@ func _spawn_impact_sparks(position: Vector3, normal: Vector3, color: Color, coun
 	particles.draw_pass_1 = mesh
 	arena_root.add_child(particles)
 	particles.global_position = position
-	get_tree().create_timer(1.0).timeout.connect(particles.queue_free.bind(), CONNECT_ONE_SHOT)
+	get_tree().create_timer(1.0, true, false, true).timeout.connect(particles.queue_free.bind(), CONNECT_ONE_SHOT)
 
 # 🏃‍♂️ AIR DASH / LAUNCHER CHASE (dash after airborne enemy)
 func _perform_air_dash(direction: Vector3) -> void:
-	if player_is_dashing or player_dash_cooldown > 0.0 or stun_lock > 0.0:
-		return
 	if not bool(player_node.get_meta("airborne", false)):
 		return
-	player_is_dashing = true
-	player_dash_timer = DASH_DURATION
-	player_dash_cooldown = DASH_COOLDOWN
-	player_dash_direction = direction.normalized()
-	var end_pos := player_node.global_position + player_dash_direction * (AIR_DASH_SPEED * DASH_DURATION)
-	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
-	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
-	end_pos.y = clampf(end_pos.y, 0.0, 6.0)
-	_spawn_speed_lines(player_node.global_position, end_pos, GameData.CHARACTERS[player_character_index].accent)
-	_play_fighter_action(player_node, "dash", DASH_DURATION)
-	var tween := create_tween()
-	tween.tween_property(player_node, "global_position", end_pos, DASH_DURATION).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tween.chain().tween_callback(func(): _end_dash())
+	_perform_fighter_dash(player_node, direction, true)
 
 # 💥 DOWNWARD SLAM FINISHER (ground impact shockwave)
 func _perform_downward_slam(target: Node3D, source: Node3D, accent: Color) -> void:
@@ -3503,6 +3557,10 @@ func _camera_punch_in(hit_position: Vector3, strength: float = 0.35, duration: f
 
 
 func _move_fighter(fighter: Node3D, other: Node3D, displacement: Vector3) -> void:
+	# Idle frames must not re-assert clearance — that was undoing corner pushback and
+	# shove-sliding fighters apart every tick while standing in close range.
+	if displacement.length_squared() < 1e-10:
+		return
 	var target := fighter.position + displacement
 	target.x = clampf(target.x, -ARENA_LIMIT, ARENA_LIMIT)
 	target.z = clampf(target.z, -ARENA_LIMIT, ARENA_LIMIT)
@@ -3532,6 +3590,26 @@ func _face_fighter(fighter: Node3D, target: Node3D, delta := 0.0) -> void:
 
 func _update_ai(delta: float) -> void:
 	if not is_instance_valid(enemy_node) or challenge_active or match_over:
+		return
+	# Training / combat-feel dummies never act — keeps tests and practice deterministic.
+	if bool(enemy_node.get_meta("test_dummy", false)) or enemy_is_training:
+		_set_locomotion(enemy_node, 0.0)
+		return
+	if enemy_dash_cooldown > 0.0:
+		enemy_dash_cooldown = maxf(0.0, enemy_dash_cooldown - delta)
+	if enemy_is_dashing:
+		enemy_dash_timer -= delta
+		if enemy_dash_timer <= 0.0:
+			_end_enemy_dash()
+		else:
+			var dash_speed := AIR_DASH_SPEED if bool(enemy_node.get_meta("airborne", false)) or bool(enemy_node.get_meta("flying", false)) else DASH_SPEED
+			_move_fighter(enemy_node, player_node, enemy_dash_direction * dash_speed * delta)
+			_set_locomotion(enemy_node, 1.0)
+		return
+	if enemy_stun_lock > 0.0:
+		_set_locomotion(enemy_node, 0.0)
+		ai_state = AIState.STUN
+		ai_state_timer = 0.0
 		return
 	var player_is_flying := bool(player_node.get_meta("flying", false))
 	if bool(enemy_node.get_meta("flying", false)):
@@ -3570,11 +3648,6 @@ func _update_ai(delta: float) -> void:
 			enemy_flight_decision_clock = rng.randf_range(4.0, 7.0)
 	if combo_lab_active:
 		_set_locomotion(enemy_node, 0.0)
-		return
-	if enemy_stun_lock > 0.0:
-		_set_locomotion(enemy_node, 0.0)
-		ai_state = AIState.STUN
-		ai_state_timer = 0.0
 		return
 	if grapple_victim == enemy_node or grapple_holder == enemy_node:
 		_set_locomotion(enemy_node, 0.0)
@@ -3653,7 +3726,7 @@ func _ai_execute_action(action: String, dist: float, profile: Dictionary) -> voi
 				dir = -enemy_node.global_basis.z
 			else:
 				dir = dir.normalized()
-			_perform_dash(dir)
+			_perform_fighter_dash(enemy_node, dir)
 			ai_state = AIState.DASH
 			ai_state_timer = DASH_DURATION
 		"PUNISH":
@@ -3679,7 +3752,7 @@ func _ai_execute_action(action: String, dist: float, profile: Dictionary) -> voi
 				away = enemy_node.global_basis.z
 			else:
 				away = away.normalized()
-			_perform_dash(away)
+			_perform_fighter_dash(enemy_node, away)
 			ai_state = AIState.RETREAT
 			ai_state_timer = DASH_DURATION
 		"ULTIMATE":
@@ -3807,8 +3880,8 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 			source.remove_meta("pending_attack_move")
 			_cancel_attack(source)
 		else:
-			if not source.has_meta("pending_attack_move"):
-				source.set_meta("pending_attack_move", move.duplicate(true))
+			# Always keep the newest buffered input so late button presses win the window.
+			source.set_meta("pending_attack_move", move.duplicate(true))
 			return
 	if is_player and kind == "attack":
 		var basic_type := str(move.get("attack_type", ""))
@@ -4004,14 +4077,19 @@ func _set_locomotion(fighter: Node3D, speed: float) -> void:
 	var animation_name := "idle"
 	if crouch_enabled and fighter == player_node:
 		animation_name = "idle"
-	elif speed >= 0.86:
-		animation_name = "walk"
 	elif speed > 0.05:
 		animation_name = "walk"
 	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
-	if is_instance_valid(animation_player) and animation_player.current_animation != animation_name:
-		animation_player.speed_scale = 1.0
-		animation_player.play(animation_name, 0.18)
+	if not is_instance_valid(animation_player):
+		return
+	var playback_speed := 1.0
+	if animation_name == "walk":
+		playback_speed = lerpf(0.85, 1.45, clampf(speed, 0.0, 1.0))
+	if animation_player.current_animation != animation_name:
+		animation_player.speed_scale = playback_speed
+		animation_player.play(animation_name, 0.12)
+	else:
+		animation_player.speed_scale = playback_speed
 
 func _start_grapple(is_player: bool, holder: Node3D, victim: Node3D) -> void:
 	_play_sfx("hit_soft", -8.0, 0.04)
@@ -4146,8 +4224,12 @@ func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 			clip_name = "charge"
 		"dodge":
 			clip_name = "dodge"
+		"dash":
+			clip_name = "dodge"
 		"jump":
 			clip_name = "jump"
+		"recovery":
+			clip_name = "getup"
 		"flight_start":
 			clip_name = "flight_start"
 		"flight_stop":
@@ -4163,10 +4245,12 @@ func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 	if not animation_player.has_animation(clip_name):
 		var fallbacks := {
 			"punch": "jab", "light_combo_1": "jab", "light_combo_2": "cross", "light_combo": "jab",
-			"aerial_attack": "kick_flying", "vanish_step": "dodge", "dash_back": "dodge",
+			"aerial_attack": "kick_flying", "vanish_step": "dodge", "dash_back": "dodge", "dash": "dodge",
 			"awakened_arts": "victory", "special_move": "kick_round", "ki_blast": "hadoken", "beam": "hadoken",
 			"beam_fire": "hadoken", "hadoken_kick": "hadoken", "strike_arts": "kick_round", "rising_rush": "uppercut",
 			"kick": "kick_front", "heavy_attack": "hook", "hit": "hit_light", "knockback": "hit_heavy",
+			"recovery": "getup", "jump": "idle", "flight_start": "idle", "flight_stop": "idle",
+			"fly_idle": "idle", "fly_up": "idle", "fly_down": "idle", "fly_forward": "walk",
 		}
 		clip_name = str(fallbacks.get(clip_name, "idle"))
 		if not animation_player.has_animation(clip_name):
@@ -4191,7 +4275,17 @@ func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> v
 	animation_player.speed_scale = clip.length / action_duration if action not in ["victory", "knockout", "flight"] else 1.0
 	if action in ["grab_hold", "grabbed", "flight"]:
 		animation_player.speed_scale = 1.0
-	animation_player.play(clip_name, 0.0 if action in ["punch", "kick", "grab"] else 0.1)
+	# Snappy attack blends; soft blends for locomotion / reactions so poses don't pop.
+	var blend := 0.0
+	if action in ["hit_react", "hit_light", "hit_heavy", "block_hit", "block"]:
+		blend = 0.04
+	elif action in ["dodge", "dash", "jump", "recovery", "charge", "victory", "knockout"]:
+		blend = 0.08
+	elif action in ["punch", "kick", "grab", "aerial_kick", "aerial_punch", "back_kick", "uppercut"]:
+		blend = 0.0
+	else:
+		blend = 0.06
+	animation_player.play(clip_name, blend)
 
 func _update_fighter_animations(delta: float) -> void:
 	for fighter in [player_node, enemy_node]:
@@ -4481,7 +4575,9 @@ func _advance_attack_states() -> void:
 			_activate_hitboxes(fighter, "all", false)
 			state["hitboxes_active"] = false
 			fighter.set_meta("attack_state", state)
-		if not is_projectile and not bool(state.impact_resolved) and frame >= impact_frame and previous_frame <= active_end_frame and bool(state.lunge_complete):
+		# Allow one-frame lag spikes: previous may jump past the active window.
+		if not is_projectile and not bool(state.impact_resolved) and bool(state.lunge_complete) \
+				and frame >= impact_frame and previous_frame < active_end_frame + 1.0:
 			state["impact_resolved"] = true
 			state["previous_frame"] = frame
 			fighter.set_meta("attack_state", state)
@@ -4509,8 +4605,9 @@ func _advance_attack_states() -> void:
 			_cancel_attack(fighter)
 			call_deferred("_start_buffered_player_move", queued_cancel)
 			continue
-		var action_finished := str(fighter.get_meta("anim_action", "idle")) == "idle"
-		if action_finished or frame >= float(frame_data.total_frames):
+		# Finish from authored frame data, not anim_action. Returning to idle early used to
+		# wipe attacks before impact frames resolved (whiffs / dropped buffers).
+		if frame >= float(frame_data.total_frames):
 			_activate_hitboxes(fighter, "all", false)
 			fighter.set_meta("attack_active", false)
 			fighter.set_meta("attack_state", {})
@@ -4520,17 +4617,20 @@ func _advance_attack_states() -> void:
 				if not queued_move.is_empty():
 					call_deferred("_start_buffered_player_move", queued_move)
 
-## Current position inside the attack, in game frames (60 fps). Read from the clip's own playhead so
-## hitboxes, hit-stop freezes and cancels always stay in step with what the player sees.
+## Current position inside the attack, in game frames (60 fps).
+## Prefer anim_elapsed (always advances with _process). If the AnimationPlayer playhead is ahead,
+## use that so hitboxes stay visual-synced — but never let a stuck playhead block impact.
 func _attack_progress_frames(fighter: Node3D, state: Dictionary) -> float:
 	var frame_data: Dictionary = state.get("frame_data", {})
 	var total := float(frame_data.get("total_frames", 1))
+	var elapsed_frames := float(fighter.get_meta("anim_elapsed", 0.0)) * 60.0
 	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
 	var clip_name := str(state.get("clip", ""))
 	if is_instance_valid(animation_player) and not clip_name.is_empty() \
 			and animation_player.current_animation == clip_name and animation_player.current_animation_length > 0.0:
-		return animation_player.current_animation_position / animation_player.current_animation_length * total
-	return float(fighter.get_meta("anim_elapsed", 0.0)) * 60.0
+		var ap_frames := animation_player.current_animation_position / animation_player.current_animation_length * total
+		return maxf(elapsed_frames, ap_frames)
+	return elapsed_frames
 
 ## 1 light punch, 2 kick, 3 launcher / heavy, 4 special or ultimate.
 func _move_cancel_rank(move: Dictionary) -> int:
@@ -4775,8 +4875,9 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 	destination.z = clampf(destination.z, -ARENA_LIMIT, ARENA_LIMIT)
 	# Whatever the wall swallowed is pushed onto the attacker instead (corner pushback); a blocked
 	# hit also nudges the attacker back a little.
-	var attacker_push := (0.16 if target_was_guarding else 0.0) + wanted_destination.distance_to(destination) * 0.85
+	var attacker_push := (0.16 if target_was_guarding else 0.0) + wanted_destination.distance_to(destination) * 0.9
 	var reaction := create_tween()
+	reaction.set_ignore_time_scale(true)
 	reaction.set_parallel()
 	reaction.tween_property(target, "global_position", destination, 0.16 + knockback * 0.22).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 	reaction.tween_property(target, "scale", Vector3(1.12, 0.9, 1.12), 0.08)
@@ -4792,6 +4893,7 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 		source_destination.x = clampf(source_destination.x, -ARENA_LIMIT, ARENA_LIMIT)
 		source_destination.z = clampf(source_destination.z, -ARENA_LIMIT, ARENA_LIMIT)
 		var recoil := create_tween()
+		recoil.set_ignore_time_scale(true)
 		recoil.set_parallel()
 		recoil.tween_property(source, "global_position:x", source_destination.x, 0.18).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
 		recoil.tween_property(source, "global_position:z", source_destination.z, 0.18).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
