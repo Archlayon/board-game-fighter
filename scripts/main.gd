@@ -321,6 +321,10 @@ var loadout_backup_actions: HBoxContainer
 var loadout_profiles: Array[Dictionary] = []
 var arena_size := Vector2(1280, 720)
 var camera_shake_strength := 0.0
+var camera_punch := 0.0
+# Phones get a lighter set of hit effects (fewer lights, no blood / ash / shell debris, fewer burst lines).
+var fx_low_quality := false
+var fx_light_clock := 0.0
 var camera_shake_phase := 0.0
 var water_shader_material: ShaderMaterial
 var camera_fov_target := 45.0
@@ -333,12 +337,13 @@ func _ready() -> void:
 	# Mobile / low-end device optimizations
 	var is_mobile := OS.get_name() == "Android" or OS.get_name() == "iOS"
 	Engine.time_scale = 1.0
+	fx_low_quality = is_mobile
 	if is_mobile:
-		ProjectSettings.set_setting("display/window/vsync/vsync_mode", 0)
-		ProjectSettings.set_setting("rendering/quality/driver/low_end_device_safemode", true)
-		ProjectSettings.set_setting("rendering/quality/default/texture_filter_default_filter", 0)
-		ProjectSettings.set_setting("rendering/quality/default/multi_sample", 0)
-		_show_feedback("MOBILE MODE · 30 FPS · LOW-END SAFE")
+		# Cap the frame rate (an uncapped phone GPU runs hot and throttles into stutter) and render the 3D
+		# scene at 75% resolution; the HUD stays full resolution and crisp.
+		Engine.max_fps = 60
+		get_viewport().scaling_3d_scale = 0.75
+		_show_feedback("MOBILE MODE · 60 FPS · LOW-END SAFE")
 
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	rng.randomize()
@@ -352,6 +357,19 @@ func _ready() -> void:
 	_rebuild_move_cards()
 	_open_main_menu()
 	get_viewport().size_changed.connect(_on_viewport_resized)
+
+## Every effect adds its own point light, and each light is evaluated for every lit surface (both fighters use a
+## toon shader). Keep only the newest few visible so a flurry of hits cannot pile up lights.
+func _limit_effect_lights(delta: float) -> void:
+	fx_light_clock += delta
+	if fx_light_clock < 0.1 or not is_instance_valid(arena_root):
+		return
+	fx_light_clock = 0.0
+	var allowed := 2 if fx_low_quality else 4
+	var lights := arena_root.find_children("*", "OmniLight3D", true, false)
+	var keep_from := maxi(0, lights.size() - allowed)
+	for index in range(lights.size()):
+		(lights[index] as OmniLight3D).visible = index >= keep_from
 
 func _play_sfx(sound_name: String, volume_db := -8.0, pitch_variation := 0.0) -> void:
 	get_node("/root/GameAudio").call("play_sfx", sound_name, volume_db, pitch_variation)
@@ -371,6 +389,7 @@ func _process(delta: float) -> void:
 	else:
 		time_scale_stuck_started_msec = -1
 
+	_limit_effect_lights(delta)
 	if main_menu_open or pause_menu_open:
 		_handle_debug_input()
 		return
@@ -456,7 +475,7 @@ func _set_hitbox_visibility(visible: bool) -> void:
 							if not is_instance_valid(dbg) and visible:
 								dbg = MeshInstance3D.new()
 								dbg.name = "DebugMesh"
-								var sphere := SphereMesh.new()
+								var sphere := _fx_sphere()
 								sphere.radius = (col.shape as SphereShape3D).radius
 								dbg.mesh = sphere
 								var mat := StandardMaterial3D.new()
@@ -481,7 +500,7 @@ func _set_hitbox_visibility(visible: bool) -> void:
 							if not is_instance_valid(dbg) and visible:
 								dbg = MeshInstance3D.new()
 								dbg.name = "DebugMesh"
-								var sphere := SphereMesh.new()
+								var sphere := _fx_sphere()
 								sphere.radius = (col.shape as SphereShape3D).radius
 								dbg.mesh = sphere
 								var mat := StandardMaterial3D.new()
@@ -537,7 +556,7 @@ func _spawn_impact_flash(position: Vector3, accent: Color, blocked: bool) -> voi
 		streak.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		flash.add_child(streak)
 	var core := MeshInstance3D.new()
-	var core_mesh := SphereMesh.new()
+	var core_mesh := _fx_sphere()
 	core_mesh.radius = 0.12
 	core_mesh.height = 0.24
 	core.mesh = core_mesh
@@ -638,26 +657,21 @@ func _spawn_lightning_bolt(source_pos: Vector3, target_pos: Vector3, color: Colo
 			next_pos = target_pos
 
 		var seg := MeshInstance3D.new()
-		var cyl := CylinderMesh.new()
+		var cyl := _fx_cylinder()
 		cyl.top_radius = rng.randf_range(0.03, 0.08)
 		cyl.bottom_radius = rng.randf_range(0.03, 0.08)
 		cyl.height = current.distance_to(next_pos)
 		seg.mesh = cyl
 		seg.material_override = material
 
-		var seg_dir := (next_pos - current).normalized()
-		var up := Vector3.UP
-		if absf(seg_dir.dot(up)) > 0.99:
-			up = Vector3.RIGHT
-		seg.look_at(next_pos, up)
-		seg.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
 		bolt.add_child(seg)
+		_place_cylinder_between(seg, current, next_pos)
 
 		current = next_pos
 
 	# Core bright white line down the center
 	var core := MeshInstance3D.new()
-	var core_cyl := CylinderMesh.new()
+	var core_cyl := _fx_cylinder()
 	core_cyl.top_radius = 0.02
 	core_cyl.bottom_radius = 0.02
 	core_cyl.height = total_distance
@@ -669,9 +683,8 @@ func _spawn_lightning_bolt(source_pos: Vector3, target_pos: Vector3, color: Colo
 	core_mat.emission = Color("#ffffff")
 	core_mat.emission_energy_multiplier = 6.0
 	core.material_override = core_mat
-	core.look_at(target_pos, Vector3.UP)
-	core.translate(Vector3(0.0, -total_distance * 0.5, 0.0))
 	bolt.add_child(core)
+	_place_cylinder_between(core, source_pos, target_pos)
 
 	# Glow light
 	var light := OmniLight3D.new()
@@ -707,7 +720,7 @@ func _spawn_anime_burst_lines(position: Vector3, color: Color, line_count: int =
 		var angle := TAU * float(i) / float(line_count)
 		var dir := Vector3(sin(angle), 0.0, cos(angle))
 		var seg := MeshInstance3D.new()
-		var cyl := CylinderMesh.new()
+		var cyl := _fx_cylinder()
 		cyl.top_radius = 0.02
 		cyl.bottom_radius = 0.0
 		cyl.height = rng.randf_range(0.6, 1.2)
@@ -732,17 +745,11 @@ func _spawn_anime_burst_lines(position: Vector3, color: Color, line_count: int =
 	tween.chain().tween_callback(lines.queue_free)
 
 # 📹 ANIME CAMERA PUNCH-IN (rapid FOV snap on heavy/counter hits)
-func _trigger_camera_punch_in(hit_position: Vector3, strength: float = 0.35, duration: float = 0.12) -> void:
-	var cam := get_viewport().get_camera_3d()
-	if not is_instance_valid(cam):
-		return
-	var original_fov := cam.fov
-	cam.fov = clampf(original_fov - strength * 30.0, 20.0, 90.0)
-
-	var target_pos := cam.global_position.lerp(hit_position, 0.35)
-	var tween := create_tween()
-	tween.tween_property(cam, "fov", original_fov, duration * 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tween.tween_property(cam, "global_position", target_pos, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+func _trigger_camera_punch_in(_hit_position: Vector3, strength: float = 0.35, _duration: float = 0.12) -> void:
+	# A short zoom-in on impact. It is added on top of the camera's own FOV in _update_camera and decays
+	# there; tweening camera.fov / position directly fought _update_camera, which rewrites both every
+	# frame, and made the picture pop on every hit.
+	camera_punch = maxf(camera_punch, clampf(strength, 0.0, 0.6))
 
 # 🎭 NEGATIVE / SILHOUETTE FLASH (screen invert for heavy/counter hits)
 var _negative_flash_active := false
@@ -766,9 +773,10 @@ func _trigger_negative_flash(duration: float = 0.06) -> void:
 
 # 🗡️ FULL ANIME HIT SEQUENCE (hit-stop + burst lines + camera punch-in + negative flash)
 func _trigger_anime_hit(hit_position: Vector3, accent: Color, is_heavy: bool = false, is_counter: bool = false) -> void:
-	_spawn_anime_burst_lines(hit_position, accent, 14 if is_heavy else 10, 0.2 if is_heavy else 0.15)
+	var line_count := (14 if is_heavy else 10) if not fx_low_quality else (6 if is_heavy else 4)
+	_spawn_anime_burst_lines(hit_position, accent, line_count, 0.2 if is_heavy else 0.15)
 	_trigger_camera_punch_in(hit_position, 0.4 if is_heavy else 0.25, 0.1 if is_heavy else 0.08)
-	if is_counter or is_heavy:
+	if (is_counter or is_heavy) and not fx_low_quality:
 		_trigger_negative_flash(0.05 if is_counter else 0.04)
 
 # 🎨 ANIME SILHOUETTE (high-contrast black base for heavy hits)
@@ -808,7 +816,7 @@ func _spawn_blood_splatter(position: Vector3, count: int = 8) -> void:
 	pmat.scale_min = 0.05
 	pmat.scale_max = 0.15
 	particles.process_material = pmat
-	var mesh := SphereMesh.new()
+	var mesh := _fx_sphere()
 	mesh.radius = 0.06
 	var material := StandardMaterial3D.new()
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -828,7 +836,7 @@ func _spawn_shell_casing(position: Vector3, direction: Vector3, count: int = 2) 
 	for i in range(count):
 		var shell := MeshInstance3D.new()
 		shell.name = "ShellCasing"
-		var cyl := CylinderMesh.new()
+		var cyl := _fx_cylinder()
 		cyl.top_radius = 0.025
 		cyl.bottom_radius = 0.025
 		cyl.height = 0.05
@@ -859,7 +867,8 @@ func _trigger_kill_sequence(target: Node3D, source: Node3D, push_direction: Vect
 	throw_tween.tween_property(target, "scale", Vector3(0.95, 1.15, 0.95), 0.12)
 	throw_tween.chain().tween_property(target, "scale", Vector3(0.7, 0.7, 0.7), 0.3)
 	# Ash burn effect at target position
-	_spawn_ash_burn(target.global_position, accent)
+	if not fx_low_quality:
+		_spawn_ash_burn(target.global_position, accent)
 	# Silhouette flash on killer
 	_trigger_silhouette_flash(source, 0.04)
 
@@ -877,7 +886,7 @@ func _spawn_ash_burn(position: Vector3, color: Color) -> void:
 	material.emission = color
 	material.emission_energy_multiplier = 3.0
 	var ring := MeshInstance3D.new()
-	var ring_mesh := CapsuleMesh.new()
+	var ring_mesh := _fx_capsule()
 	ring_mesh.radius = 0.5
 	ring_mesh.height = 0.02
 	ring.mesh = ring_mesh
@@ -918,7 +927,7 @@ func _trigger_mega_beam(source: Node3D, target: Node3D, move: Dictionary, accent
 	cmat.emission = accent
 	cmat.emission_energy_multiplier = 5.0
 	var sphere := MeshInstance3D.new()
-	var sph := SphereMesh.new()
+	var sph := _fx_sphere()
 	sph.radius = 0.5
 	sphere.mesh = sph
 	sphere.material_override = cmat
@@ -955,19 +964,18 @@ func _spawn_mega_beam_bolt(start_pos: Vector3, end_pos: Vector3, direction: Vect
 	beam_mat.emission = color
 	beam_mat.emission_energy_multiplier = 6.0
 
-	var cyl := CylinderMesh.new()
+	var cyl := _fx_cylinder()
 	cyl.top_radius = 0.6
 	cyl.bottom_radius = 0.6
 	cyl.height = start_pos.distance_to(end_pos)
 	var beam_mesh := MeshInstance3D.new()
 	beam_mesh.mesh = cyl
 	beam_mesh.material_override = beam_mat
-	beam_mesh.look_at(end_pos, Vector3.UP)
-	beam_mesh.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
 	beam.add_child(beam_mesh)
+	_place_cylinder_between(beam_mesh, start_pos, end_pos)
 
 	var inner := MeshInstance3D.new()
-	var inner_cyl := CylinderMesh.new()
+	var inner_cyl := _fx_cylinder()
 	inner_cyl.top_radius = 0.25
 	inner_cyl.bottom_radius = 0.25
 	inner_cyl.height = start_pos.distance_to(end_pos)
@@ -980,9 +988,8 @@ func _spawn_mega_beam_bolt(start_pos: Vector3, end_pos: Vector3, direction: Vect
 	imat.emission = Color("#ffffff")
 	imat.emission_energy_multiplier = 8.0
 	inner_mesh.material_override = imat
-	inner_mesh.look_at(end_pos, Vector3.UP)
-	inner_mesh.translate(Vector3(0.0, -inner_cyl.height * 0.5, 0.0))
 	beam.add_child(inner_mesh)
+	_place_cylinder_between(inner_mesh, start_pos, end_pos)
 
 	var light := OmniLight3D.new()
 	light.light_color = color
@@ -1060,7 +1067,7 @@ func _trigger_void_vortex(source: Node3D, target: Node3D, move: Dictionary, acce
 	rune.name = "VoidRune"
 	arena_root.add_child(rune)
 	rune.global_position = center
-	var rune_mesh := CapsuleMesh.new()
+	var rune_mesh := _fx_capsule()
 	rune_mesh.radius = 1.2
 	rune_mesh.height = 0.05
 	rune.mesh = rune_mesh
@@ -1090,7 +1097,7 @@ func _trigger_void_vortex(source: Node3D, target: Node3D, move: Dictionary, acce
 	bh_mat.emission = accent
 	bh_mat.emission_energy_multiplier = 4.0
 	var bh_mesh := MeshInstance3D.new()
-	var bh := SphereMesh.new()
+	var bh := _fx_sphere()
 	bh.radius = 0.1
 	bh_mesh.mesh = bh
 	bh_mesh.material_override = bh_mat
@@ -1164,7 +1171,7 @@ func _trigger_clockwork_pillar(source: Node3D, target: Node3D, move: Dictionary,
 	glyph.name = "ClockworkGlyph"
 	arena_root.add_child(glyph)
 	glyph.global_position = center
-	var glyph_mesh := CapsuleMesh.new()
+	var glyph_mesh := _fx_capsule()
 	glyph_mesh.radius = 2.0
 	glyph_mesh.height = 0.04
 	glyph.mesh = glyph_mesh
@@ -1180,7 +1187,7 @@ func _trigger_clockwork_pillar(source: Node3D, target: Node3D, move: Dictionary,
 
 	# Rotating inner rings
 	var ring1 := MeshInstance3D.new()
-	var ring_mesh1 := CapsuleMesh.new()
+	var ring_mesh1 := _fx_capsule()
 	ring_mesh1.radius = 1.4
 	ring_mesh1.height = 0.02
 	ring1.mesh = ring_mesh1
@@ -1188,7 +1195,7 @@ func _trigger_clockwork_pillar(source: Node3D, target: Node3D, move: Dictionary,
 	ring1.rotation.x = PI / 2.0
 	glyph.add_child(ring1)
 	var ring2 := MeshInstance3D.new()
-	var ring_mesh2 := CapsuleMesh.new()
+	var ring_mesh2 := _fx_capsule()
 	ring_mesh2.radius = 0.8
 	ring_mesh2.height = 0.02
 	ring2.mesh = ring_mesh2
@@ -1206,7 +1213,7 @@ func _trigger_clockwork_pillar(source: Node3D, target: Node3D, move: Dictionary,
 	pillar.name = "LightPillar"
 	arena_root.add_child(pillar)
 	pillar.global_position = pillar_start
-	var pillar_mesh := CylinderMesh.new()
+	var pillar_mesh := _fx_cylinder()
 	pillar_mesh.top_radius = 1.0
 	pillar_mesh.bottom_radius = 1.0
 	pillar_mesh.height = 0.5
@@ -1369,7 +1376,7 @@ func _spawn_fissure_explosion(position: Vector3, color: Color) -> void:
 	mat.emission = color
 	mat.emission_energy_multiplier = 5.0
 	var sphere := MeshInstance3D.new()
-	var sph := SphereMesh.new()
+	var sph := _fx_sphere()
 	sph.radius = 0.3
 	sphere.mesh = sph
 	sphere.material_override = mat
@@ -1406,7 +1413,7 @@ func _trigger_sonic_domain(source: Node3D, target: Node3D, move: Dictionary, acc
 	omat.emission = accent
 	omat.emission_energy_multiplier = 4.0
 	var osphere := MeshInstance3D.new()
-	var osph := SphereMesh.new()
+	var osph := _fx_sphere()
 	osph.radius = 0.3
 	osphere.mesh = osph
 	osphere.material_override = omat
@@ -1417,7 +1424,7 @@ func _trigger_sonic_domain(source: Node3D, target: Node3D, move: Dictionary, acc
 	dome.name = "SonicDome"
 	arena_root.add_child(dome)
 	dome.global_position = center + Vector3.UP * 0.5
-	var dmesh := SphereMesh.new()
+	var dmesh := _fx_sphere()
 	dmesh.radius = 0.1
 	dmesh.height = 0.1
 	dome.mesh = dmesh
@@ -1447,7 +1454,7 @@ func _trigger_sonic_domain(source: Node3D, target: Node3D, move: Dictionary, acc
 				return
 			# Rhythmic ripples
 			var ripple := MeshInstance3D.new()
-			var rmesh := CapsuleMesh.new()
+			var rmesh := _fx_capsule()
 			rmesh.radius = 0.02
 			rmesh.height = max_radius * 2.0
 			ripple.mesh = rmesh
@@ -1508,7 +1515,7 @@ func _spawn_shockwave_ring(position: Vector3, color: Color, radius: float = 2.0,
 	mat.emission = color
 	mat.emission_energy_multiplier = 3.0
 	var mesh := MeshInstance3D.new()
-	var capsule := CapsuleMesh.new()
+	var capsule := _fx_capsule()
 	capsule.radius = 0.03
 	capsule.height = radius * 2.0
 	mesh.mesh = capsule
@@ -1623,6 +1630,10 @@ func _build_world() -> void:
 	sun.rotation_degrees = Vector3(-48.0, -28.0, 0.0)
 	sun.light_energy = 1.25
 	sun.shadow_enabled = true
+	# One shadow cascade over the playable area is plenty. The default four-cascade, 100 m setup redraws
+	# every shadow caster four times per frame.
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	sun.directional_shadow_max_distance = 24.0
 	add_child(sun)
 
 	var floor := MeshInstance3D.new()
@@ -1708,17 +1719,18 @@ func _add_forest() -> void:
 			var x: float = float(side) * (8.0 + rng.randf_range(0.0, 3.0))
 			var z := -8.5 - float(index % 3) * 1.35
 			var mesa := MeshInstance3D.new()
-			var shape := SphereMesh.new()
+			var shape := _fx_sphere()
 			shape.radius = rng.randf_range(1.4, 2.8)
 			shape.height = shape.radius * rng.randf_range(1.0, 1.7)
 			mesa.mesh = shape
 			mesa.position = Vector3(x, shape.height * 0.18, z)
 			mesa.scale = Vector3(rng.randf_range(0.9, 1.4), rng.randf_range(1.3, 2.3), rng.randf_range(0.65, 1.0))
 			mesa.material_override = _make_material(rock_colors[rng.randi_range(0, rock_colors.size() - 1)], 1.0)
+			mesa.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			arena_root.add_child(mesa)
 	for index in range(24):
 		var boulder := MeshInstance3D.new()
-		var rock := SphereMesh.new()
+		var rock := _fx_sphere()
 		rock.radius = rng.randf_range(0.22, 0.75)
 		rock.height = rock.radius * rng.randf_range(0.7, 1.25)
 		boulder.mesh = rock
@@ -1726,11 +1738,12 @@ func _add_forest() -> void:
 		boulder.position = Vector3(side * rng.randf_range(7.2, 11.0), rock.radius * 0.25, rng.randf_range(-7.5, 5.0))
 		boulder.scale = Vector3(rng.randf_range(0.8, 1.5), rng.randf_range(0.7, 1.2), rng.randf_range(0.8, 1.4))
 		boulder.material_override = _make_material(rock_colors[rng.randi_range(0, rock_colors.size() - 1)], 1.0)
+		boulder.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		arena_root.add_child(boulder)
 
 func _add_tree(origin: Vector3, height: float) -> void:
 	var trunk := MeshInstance3D.new()
-	var trunk_mesh := CylinderMesh.new()
+	var trunk_mesh := _fx_cylinder()
 	trunk_mesh.top_radius = 0.14
 	trunk_mesh.bottom_radius = 0.24
 	trunk_mesh.height = height * 0.34
@@ -1743,7 +1756,7 @@ func _add_tree(origin: Vector3, height: float) -> void:
 
 	for level in range(3):
 		var foliage := MeshInstance3D.new()
-		var cone := CylinderMesh.new()
+		var cone := _fx_cylinder()
 		cone.top_radius = 0.0
 		cone.bottom_radius = height * (0.29 - level * 0.045)
 		cone.height = height * 0.46
@@ -1754,6 +1767,48 @@ func _add_tree(origin: Vector3, height: float) -> void:
 		leaves.roughness = 0.95
 		foliage.material_override = leaves
 		arena_root.add_child(foliage)
+
+# Godot's default primitives are very dense (a sphere is 4,224 triangles, a cylinder 64 sides). The arena
+# rocks and the short-lived effects used those defaults, which is far too heavy for a phone GPU.
+# These keep the same shapes with a fraction of the triangles (sphere 144, cylinder ~16).
+func _fx_sphere() -> SphereMesh:
+	var mesh := SphereMesh.new()
+	mesh.radial_segments = 12
+	mesh.rings = 6
+	return mesh
+
+func _fx_cylinder() -> CylinderMesh:
+	var mesh := CylinderMesh.new()
+	mesh.radial_segments = 8
+	mesh.rings = 1
+	return mesh
+
+func _fx_capsule() -> CapsuleMesh:
+	var mesh := CapsuleMesh.new()
+	mesh.radial_segments = 12
+	mesh.rings = 4
+	return mesh
+
+func _fx_torus() -> TorusMesh:
+	var mesh := TorusMesh.new()
+	mesh.rings = 16
+	mesh.ring_segments = 6
+	return mesh
+
+## Stretches a cylinder (whose length runs along Y) between two world points. The mesh must already be in the tree.
+func _place_cylinder_between(mesh_instance: Node3D, from: Vector3, to: Vector3) -> void:
+	var delta := to - from
+	var length := delta.length()
+	if length < 0.001:
+		mesh_instance.visible = false
+		return
+	var direction := delta / length
+	mesh_instance.global_position = (from + to) * 0.5
+	var axis := Vector3.UP.cross(direction)
+	if axis.length_squared() < 0.0001:
+		mesh_instance.global_basis = Basis() if direction.y > 0.0 else Basis(Vector3.RIGHT, PI)
+	else:
+		mesh_instance.global_basis = Basis(axis.normalized(), Vector3.UP.angle_to(direction))
 
 func _make_material(color: Color, roughness := 0.7) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -1802,7 +1857,7 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	glow_material.emission_energy_multiplier = 2.0
 	for eye_x in [-0.09, 0.09]:
 		var eye := MeshInstance3D.new()
-		var eye_mesh := SphereMesh.new()
+		var eye_mesh := _fx_sphere()
 		eye_mesh.radius = 0.045
 		eye_mesh.height = 0.035
 		eye.mesh = eye_mesh
@@ -1874,25 +1929,25 @@ func _add_fighter_costume(skeleton: Skeleton3D, accent: Color, shirt_color: Colo
 	var cloth := _make_material(shirt_color, 0.72)
 	var trim := _make_material(accent, 0.48)
 	var dark := _make_material(Color("#292d3b"), 0.78)
-	_add_bone_gear(skeleton, "Chest", "GiTop", SphereMesh.new(), Vector3(0.31, 0.37, 0.2), Vector3(0.0, 0.0, 0.0), cloth)
-	_add_bone_gear(skeleton, "Spine", "WaistWrap", CylinderMesh.new(), Vector3(0.23, 0.12, 0.23), Vector3(0.0, -0.12, 0.0), trim)
-	_add_bone_gear(skeleton, "Hips", "GiPants", SphereMesh.new(), Vector3(0.28, 0.2, 0.2), Vector3(0.0, -0.08, 0.0), cloth)
-	_add_bone_gear(skeleton, "Head", "AnimeHair", SphereMesh.new(), Vector3(0.26, 0.29, 0.24), Vector3(0.0, 0.18, 0.0), dark)
+	_add_bone_gear(skeleton, "Chest", "GiTop", _fx_sphere(), Vector3(0.31, 0.37, 0.2), Vector3(0.0, 0.0, 0.0), cloth)
+	_add_bone_gear(skeleton, "Spine", "WaistWrap", _fx_cylinder(), Vector3(0.23, 0.12, 0.23), Vector3(0.0, -0.12, 0.0), trim)
+	_add_bone_gear(skeleton, "Hips", "GiPants", _fx_sphere(), Vector3(0.28, 0.2, 0.2), Vector3(0.0, -0.08, 0.0), cloth)
+	_add_bone_gear(skeleton, "Head", "AnimeHair", _fx_sphere(), Vector3(0.26, 0.29, 0.24), Vector3(0.0, 0.18, 0.0), dark)
 	for spike_index in range(5):
-		var spike := _add_bone_gear(skeleton, "Head", "HairSpike%d" % spike_index, CylinderMesh.new(), Vector3(0.085, 0.31, 0.085), Vector3((spike_index - 2) * 0.09, 0.36 + (1.0 - absf(spike_index - 2) * 0.24), 0.0), dark)
+		var spike := _add_bone_gear(skeleton, "Head", "HairSpike%d" % spike_index, _fx_cylinder(), Vector3(0.085, 0.31, 0.085), Vector3((spike_index - 2) * 0.09, 0.36 + (1.0 - absf(spike_index - 2) * 0.24), 0.0), dark)
 		if is_instance_valid(spike):
 			spike.rotation_degrees.z = float(spike_index - 2) * -18.0
 	for bone in ["LeftHand", "RightHand"]:
-		_add_bone_gear(skeleton, bone, bone + "Glove", SphereMesh.new(), Vector3(0.14, 0.12, 0.13), Vector3.ZERO, trim)
+		_add_bone_gear(skeleton, bone, bone + "Glove", _fx_sphere(), Vector3(0.14, 0.12, 0.13), Vector3.ZERO, trim)
 	for bone in ["LeftFoot", "RightFoot"]:
-		_add_bone_gear(skeleton, bone, bone + "Boot", SphereMesh.new(), Vector3(0.14, 0.11, 0.2), Vector3(0.0, 0.0, -0.045), trim)
+		_add_bone_gear(skeleton, bone, bone + "Boot", _fx_sphere(), Vector3(0.14, 0.11, 0.2), Vector3(0.0, 0.0, -0.045), trim)
 	for bone in ["LeftUpperArm", "RightUpperArm"]:
-		_add_bone_gear(skeleton, bone, bone + "Sleeve", SphereMesh.new(), Vector3(0.13, 0.18, 0.13), Vector3(0.0, -0.08, 0.0), cloth)
+		_add_bone_gear(skeleton, bone, bone + "Sleeve", _fx_sphere(), Vector3(0.13, 0.18, 0.13), Vector3(0.0, -0.08, 0.0), cloth)
 	for bone in ["LeftUpperLeg", "RightUpperLeg"]:
-		_add_bone_gear(skeleton, bone, bone + "TrouserLeg", SphereMesh.new(), Vector3(0.15, 0.24, 0.15), Vector3(0.0, -0.09, 0.0), cloth)
+		_add_bone_gear(skeleton, bone, bone + "TrouserLeg", _fx_sphere(), Vector3(0.15, 0.24, 0.15), Vector3(0.0, -0.09, 0.0), cloth)
 	for bone in ["LeftLowerLeg", "RightLowerLeg"]:
-		_add_bone_gear(skeleton, bone, bone + "ShinWrap", SphereMesh.new(), Vector3(0.12, 0.2, 0.13), Vector3(0.0, -0.08, 0.0), trim)
-	_add_bone_gear(skeleton, "Neck", "NeckScarf", CylinderMesh.new(), Vector3(0.13, 0.07, 0.13), Vector3.ZERO, trim)
+		_add_bone_gear(skeleton, bone, bone + "ShinWrap", _fx_sphere(), Vector3(0.12, 0.2, 0.13), Vector3(0.0, -0.08, 0.0), trim)
+	_add_bone_gear(skeleton, "Neck", "NeckScarf", _fx_cylinder(), Vector3(0.13, 0.07, 0.13), Vector3.ZERO, trim)
 
 func _add_bone_gear(skeleton: Skeleton3D, bone: String, gear_name: String, mesh_resource: PrimitiveMesh, dimensions: Vector3, local_offset: Vector3, material: Material) -> MeshInstance3D:
 	if skeleton.find_bone(bone) < 0:
@@ -2121,7 +2176,7 @@ func _spawn_vanish_burst(fighter: Node3D, accent: Color) -> void:
 	if not is_instance_valid(fighter) or not is_instance_valid(arena_root):
 		return
 	var ring := MeshInstance3D.new()
-	var ring_mesh := TorusMesh.new()
+	var ring_mesh := _fx_torus()
 	ring_mesh.inner_radius = 0.32
 	ring_mesh.outer_radius = 0.55
 	ring.mesh = ring_mesh
@@ -3358,7 +3413,7 @@ func _spawn_speed_lines(start_pos: Vector3, end_pos: Vector3, color: Color) -> v
 	material.emission_energy_multiplier = 3.0
 	for i in range(6):
 		var seg := MeshInstance3D.new()
-		var cyl := CylinderMesh.new()
+		var cyl := _fx_cylinder()
 		cyl.top_radius = 0.02
 		cyl.bottom_radius = 0.0
 		cyl.height = rng.randf_range(0.6, 1.4)
@@ -3405,7 +3460,7 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 	material.emission_energy_multiplier = 4.0
 	var mid := start_pos.lerp(end_pos, 0.5) + Vector3.UP * arc_height
 	var seg1 := MeshInstance3D.new()
-	var cyl1 := CylinderMesh.new()
+	var cyl1 := _fx_cylinder()
 	cyl1.top_radius = 0.06
 	cyl1.bottom_radius = 0.02
 	cyl1.height = maxf(0.05, start_pos.distance_to(mid))
@@ -3417,7 +3472,7 @@ func _spawn_weapon_trail(start_pos: Vector3, end_pos: Vector3, color: Color, arc
 		seg1.look_at(mid, Vector3.UP)
 		seg1.rotate_object_local(Vector3.RIGHT, PI / 2.0)
 	var seg2 := MeshInstance3D.new()
-	var cyl2 := CylinderMesh.new()
+	var cyl2 := _fx_cylinder()
 	cyl2.top_radius = 0.02
 	cyl2.bottom_radius = 0.06
 	cyl2.height = maxf(0.05, mid.distance_to(end_pos))
@@ -3515,7 +3570,7 @@ func _spawn_ground_shockwave(position: Vector3, color: Color) -> void:
 	material.emission = color
 	material.emission_energy_multiplier = 3.0
 	var ring := MeshInstance3D.new()
-	var ring_mesh := CapsuleMesh.new()
+	var ring_mesh := _fx_capsule()
 	ring_mesh.radius = 0.02
 	ring_mesh.height = SLAM_SHOCKWAVE_RADIUS * 2.0
 	ring.mesh = ring_mesh
@@ -3546,15 +3601,7 @@ func _apply_wall_bounce(fighter: Node3D, hit_normal: Vector3, bounce_strength: f
 
 # 📹 CAMERA PUNCH-IN (rapid FOV snap on heavy hits)
 func _camera_punch_in(hit_position: Vector3, strength: float = 0.35, duration: float = 0.12) -> void:
-	if not is_instance_valid(camera):
-		return
-	camera_fov_target = clampf(45.0 - strength * 30.0, 20.0, 90.0)
-	var cam_pos := camera.global_position
-	var target_pos := cam_pos.lerp(hit_position, 0.35)
-	var tween := create_tween()
-	tween.tween_property(camera, "fov", 45.0, duration * 1.5).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-	tween.tween_property(camera, "global_position", target_pos, duration).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-
+	_trigger_camera_punch_in(hit_position, strength, duration)
 
 func _move_fighter(fighter: Node3D, other: Node3D, displacement: Vector3) -> void:
 	# Idle frames must not re-assert clearance — that was undoing corner pushback and
@@ -4427,7 +4474,7 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		var projectile_end := target.global_position + Vector3.UP * (1.05 if not bool(move.get("signature", false)) else 1.2)
 		var orb := MeshInstance3D.new()
 		orb.name = "EnergyProjectile"
-		var sphere := SphereMesh.new()
+		var sphere := _fx_sphere()
 		sphere.radius = 0.22 if not bool(move.get("signature", false)) else 0.42
 		sphere.height = sphere.radius * 2.0
 		orb.mesh = sphere
@@ -4445,7 +4492,7 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		energy_material.emission_energy_multiplier = 2.8 if not bool(move.get("signature", false)) else 4.5
 		orb.material_override = energy_material
 		var streak := MeshInstance3D.new()
-		var streak_mesh := CylinderMesh.new()
+		var streak_mesh := _fx_cylinder()
 		streak_mesh.top_radius = 0.08 if not bool(move.get("signature", false)) else 0.12
 		streak_mesh.bottom_radius = 0.13 if not bool(move.get("signature", false)) else 0.22
 		streak_mesh.height = 0.65 if not bool(move.get("signature", false)) else 1.6
@@ -4550,7 +4597,8 @@ func _on_energy_projectile_arrived(orb: Variant, source: Variant, target: Varian
 	state["previous_frame"] = float(state.frame_data.total_frames)
 	source.set_meta("attack_state", state)
 	_spawn_lightning_bolt(orb.global_position, target.global_position, accent, 10, 0.2)
-	_spawn_shell_casing(orb.global_position, -orb.global_basis.z, 2)
+	if not fx_low_quality:
+		_spawn_shell_casing(orb.global_position, -orb.global_basis.z, 2)
 	_resolve_attack_impact(source, target, move, target_was_guarding, damage, stun_damage, is_player, kind, accent, lunge_start)
 
 func _advance_attack_states() -> void:
@@ -4772,7 +4820,8 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 	_trigger_anime_hit(impact_position, accent, kind == "ultimate" or damage >= 18.0, is_counter_hit)
 	if is_counter_hit or (kind == "ultimate"):
 		_trigger_silhouette_flash(target, 0.06)
-		_spawn_blood_splatter(impact_position, 10 if is_counter_hit else 6)
+		if not fx_low_quality:
+			_spawn_blood_splatter(impact_position, 10 if is_counter_hit else 6)
 	if is_player:
 		if not resolving_combo_practice:
 			enemy_hp = maxf(0.0, enemy_hp - damage)
@@ -5185,7 +5234,7 @@ func _set_charge_aura(enabled: bool) -> void:
 	var accent: Color = style_auras.get(player_style, GameData.CHARACTERS[player_character_index].accent)
 	for ring_index in range(2):
 		var ring := MeshInstance3D.new()
-		var ring_mesh := TorusMesh.new()
+		var ring_mesh := _fx_torus()
 		ring_mesh.inner_radius = 0.46 + float(ring_index) * 0.08
 		ring_mesh.outer_radius = 0.55 + float(ring_index) * 0.08
 		ring.mesh = ring_mesh
@@ -5231,7 +5280,8 @@ func _update_camera(delta: float) -> void:
 		speed_factor = maxf(speed_factor, 1.5)
 	camera_fov_target = lerp(45.0, 70.0, clampf(speed_factor * 0.4, 0.0, 1.0))
 	camera_fov_current = lerp(camera_fov_current, camera_fov_target, delta * 8.0)
-	camera.fov = camera_fov_current
+	camera_punch = move_toward(camera_punch, 0.0, delta * 4.0)
+	camera.fov = camera_fov_current - camera_punch * 30.0
 
 	var blend := 1.0 - exp(-delta * 5.0)
 	camera.position = camera.position.lerp(desired_position + shake, blend)
