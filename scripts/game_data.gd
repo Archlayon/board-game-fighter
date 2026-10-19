@@ -59,6 +59,15 @@ const STYLE_MOVES: Dictionary = {
 	]
 }
 
+# Draft matchup bonuses from style_matchups.xlsx. Weak matchups do not reduce damage.
+const STYLE_ADVANTAGE: Dictionary = {
+	"Chess": {"Cards": 1.15, "Scrabble": 1.15},
+	"Checkers": {"Chess": 1.15, "Ludo": 1.15},
+	"Ludo": {"Chess": 1.15, "Cards": 1.15},
+	"Cards": {"Checkers": 1.15, "Scrabble": 1.15},
+	"Scrabble": {"Checkers": 1.15, "Ludo": 1.15}
+}
+
 const ULTIMATE_NAMES: Dictionary = {
 	"Chess": ["Checkmate", "Big Bang", "Black Hole", "Final Cut", "Grand Gambit", "Comet Fall"],
 	"Checkers": ["Triple Jump", "Crown Storm", "Back Row Breaker", "King's Gambit", "Forced March", "Final Capture"],

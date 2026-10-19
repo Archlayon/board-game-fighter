@@ -649,9 +649,10 @@ func _spawn_lightning_bolt(source_pos: Vector3, target_pos: Vector3, color: Colo
 		var up := Vector3.UP
 		if absf(seg_dir.dot(up)) > 0.99:
 			up = Vector3.RIGHT
+		bolt.add_child(seg)
+		seg.global_position = current
 		seg.look_at(next_pos, up)
 		seg.translate(Vector3(0.0, -cyl.height * 0.5, 0.0))
-		bolt.add_child(seg)
 
 		current = next_pos
 
@@ -669,9 +670,10 @@ func _spawn_lightning_bolt(source_pos: Vector3, target_pos: Vector3, color: Colo
 	core_mat.emission = Color("#ffffff")
 	core_mat.emission_energy_multiplier = 6.0
 	core.material_override = core_mat
+	bolt.add_child(core)
+	core.global_position = source_pos
 	core.look_at(target_pos, Vector3.UP)
 	core.translate(Vector3(0.0, -total_distance * 0.5, 0.0))
-	bolt.add_child(core)
 
 	# Glow light
 	var light := OmniLight3D.new()
@@ -3095,6 +3097,7 @@ func _start_match() -> void:
 	stun_lock = 0.0
 	challenge_cost = 0.0
 	ai_clock = float(_ai_profile().decision_interval)
+	ai_decision_timer = 0.0
 	ai_defense_clock = 0.0
 	enemy_guard_timer = 0.0
 	mp_clash_cooldown = 0.0
@@ -4722,6 +4725,9 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 		damage = maxf(1.0, damage - current_target_guard)
 		target_was_guarding = true
 
+	var attacker_style := player_style if is_player else opponent_style
+	var defender_style := opponent_style if is_player else player_style
+	damage *= float(GameData.STYLE_ADVANTAGE.get(attacker_style, {}).get(defender_style, 1.0))
 	damage *= hit_damage_mult
 	stun_damage *= hit_damage_mult
 
