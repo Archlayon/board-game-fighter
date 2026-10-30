@@ -1,27 +1,57 @@
-# round_timer_logic.gd
-# Deterministic round management without Node timers
 extends Node
+class_name RoundTimerLogic
+## Frame-counted round clock; stable with pause/resume and variable render rate.
 
-# EXPERT NOTE: In fighting games, the timer must stay in sync 
-# with the frames, not the wall-clock time.
+signal time_changed(seconds_remaining: int, frames_remaining: int)
+signal timed_out
 
-var frames_remaining: int = 60 * 60 # 60 seconds at 60fps
+@export_range(1.0, 600.0, 1.0) var round_duration_seconds: float = 60.0
+@export var frames_per_second: int = 60
 
-func _physics_process(_delta):
+var frames_remaining: int = 3600
+var running: bool = false
+var _frame_accumulator: float = 0.0
+var _timeout_emitted: bool = false
+
+
+func _ready() -> void:
+	reset_round()
+
+
+func _process(delta: float) -> void:
+	if not running:
+		return
+	_frame_accumulator += delta * float(frames_per_second)
+	var elapsed_frames := floori(_frame_accumulator)
+	if elapsed_frames <= 0:
+		return
+	_frame_accumulator -= float(elapsed_frames)
+	frames_remaining = maxi(0, frames_remaining - elapsed_frames)
+	time_changed.emit(ceili(float(frames_remaining) / float(frames_per_second)), frames_remaining)
+	if frames_remaining == 0 and not _timeout_emitted:
+		_timeout_emitted = true
+		running = false
+		timed_out.emit()
+
+
+func start_round(duration_seconds: float = -1.0) -> void:
+	if duration_seconds > 0.0:
+		round_duration_seconds = duration_seconds
+	reset_round()
+	running = true
+
+
+func pause_round() -> void:
+	running = false
+
+
+func resume_round() -> void:
 	if frames_remaining > 0:
-		frames_remaining -= 1
-		if frames_remaining == 0:
-			_on_time_out()
+		running = true
 
-func _on_time_out():
-	print("Round Ended by Frame Count")
-# =============================================================================
-# GDSkills research links (agents) — does not affect runtime
-# Official docs:
-# - https://docs.godotengine.org/en/stable/tutorials/scripting/idle_and_physics_processing.html
-# - https://docs.godotengine.org/en/stable/classes/class_scenetreetimer.html
-# Related skills:
-# - https://github.com/thedivergentai/gd-agentic-skills/blob/main/skills/godot-signal-architecture/SKILL.md — round timeout / match-end events
-# - https://github.com/thedivergentai/gd-agentic-skills/blob/main/skills/godot-monte-carlo-balancer/SKILL.md — timeout win-rate simulation knobs
-# Parent skill: https://github.com/thedivergentai/gd-agentic-skills/blob/main/skills/godot-genre-fighting/SKILL.md
-# =============================================================================
+
+func reset_round() -> void:
+	frames_remaining = roundi(round_duration_seconds * float(frames_per_second))
+	_frame_accumulator = 0.0
+	_timeout_emitted = false
+	time_changed.emit(ceili(float(frames_remaining) / float(frames_per_second)), frames_remaining)

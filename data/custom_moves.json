@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "moves": [
+    {
+      "name": "Dragon Punch",
+      "kind": "attack",
+      "damage": 18,
+      "stun": 22,
+      "cost": 0,
+      "animation": "rising_rush",
+      "attack_type": "uppercut",
+      "launcher": true,
+      "frame_data": {
+        "startup_frames": 5,
+        "active_frames": 3,
+        "recovery_frames": 15
+      },
+      "cancel_start_frame": 8,
+      "cancel_end_frame": 12,
+      "rank": 3
+    },
+    {
+      "name": "Hadouken",
+      "kind": "attack",
+      "damage": 12,
+      "stun": 8,
+      "cost": 1,
+      "animation": "hadoken",
+      "attack_type": "punch",
+      "projectile": true,
+      "frame_data": {
+        "startup_frames": 8,
+        "active_frames": 2,
+        "recovery_frames": 12
+      },
+      "cancel_start_frame": 10,
+      "cancel_end_frame": 14,
+      "rank": 2
+    },
+    {
+      "name": "Spinning Kick",
+      "kind": "attack",
+      "damage": 16,
+      "stun": 16,
+      "cost": 0,
+      "animation": "kick",
+      "attack_type": "kick",
+      "multi_hit": true,
+      "frame_data": {
+        "startup_frames": 7,
+        "active_frames": 4,
+        "recovery_frames": 14
+      },
+      "cancel_start_frame": 9,
+      "cancel_end_frame": 13,
+      "rank": 3
+    },
+    {
+      "name": "Guard Break",
+      "kind": "attack",
+      "damage": 8,
+      "stun": 30,
+      "cost": 0,
+      "animation": "kick",
+      "attack_type": "kick",
+      "guard_damage": 25,
+      "frame_data": {
+        "startup_frames": 9,
+        "active_frames": 3,
+        "recovery_frames": 16
+      },
+      "cancel_start_frame": 12,
+      "cancel_end_frame": 16,
+      "rank": 3
+    },
+    {
+      "name": "Ultimate Dragon",
+      "kind": "ultimate",
+      "damage": 45,
+      "stun": 40,
+      "cost": 4,
+      "animation": "special_move",
+      "attack_type": "uppercut",
+      "ultimate_type": "mega_beam",
+      "signature": true,
+      "frame_data": {
+        "startup_frames": 10,
+        "active_frames": 6,
+        "recovery_frames": 20
+      },
+      "rank": 4
+    }
+  ],
+  "styles": {
+    "Chess": {
+      "name": "Chess Style",
+      "accent": "#72d5ff",
+      "ultimate_names": ["Checkmate", "Pawn Storm", "Castling", "En Passant"],
+      "puzzle_prompts": ["Which piece moves diagonally any distance?", "What is the only piece that cannot move backward?"],
+      "puzzle_answers": [["Bishop"], ["Pawn"]]
+    },
+    "Checkers": {
+      "name": "Checkers Style",
+      "accent": "#ff805f",
+      "ultimate_names": ["Double Jump", "King Me", "Capture All"],
+      "puzzle_prompts": ["Jump an opponent piece to capture it. Which action?"],
+      "puzzle_answers": [["Jump"]]
+    },
+    "Ludo": {
+      "name": "Ludo Style",
+      "accent": "#ffd45c",
+      "ultimate_names": ["Six Roll", "Home Run", "Safe Zone"],
+      "puzzle_prompts": ["Roll two dice. What is the highest total?"],
+      "puzzle_answers": [["12"]]
+    },
+    "Cards": {
+      "name": "Cards Style",
+      "accent": "#ce8cff",
+      "ultimate_names": ["Royal Flush", "Ace Up Sleeve", "Joker Wild"],
+      "puzzle_prompts": ["Which suit is red?"],
+      "puzzle_answers": [["Hearts"]]
+    },
+    "Scrabble": {
+      "name": "Scrabble Style",
+      "accent": "#91e596",
+      "ultimate_names": ["Triple Word", "Bingo", "Perfect Score"],
+      "puzzle_prompts": ["Type the word shown to prove your Scrabble move."],
+      "puzzle_answers": [["CHECKMATE"]]
+    }
+  }
+}

@@ -13,7 +13,8 @@ const CHARACTERS: Array[Dictionary] = [
 	{"name": "Engineer", "accent": Color("#ffc16c"), "passive": "Guard moves absorb more damage.", "signature": "Titan Frame", "bonus_damage": 1, "bonus_stun": 2},
 	{"name": "Strategist", "accent": Color("#c7b8ff"), "passive": "Medium attacks build extra stun.", "signature": "Grand Gambit", "bonus_damage": 1, "bonus_stun": 4},
 	{"name": "Oracle", "accent": Color("#f6a9e1"), "passive": "The first move of each match hits harder.", "signature": "Last Prophecy", "bonus_damage": 2, "bonus_stun": 2},
-	{"name": "Captain", "accent": Color("#72e3e7"), "passive": "Aggressive attacks break through guard.", "signature": "Full Sail", "bonus_damage": 3, "bonus_stun": 1}
+	{"name": "Captain", "accent": Color("#72e3e7"), "passive": "Aggressive attacks break through guard.", "signature": "Full Sail", "bonus_damage": 3, "bonus_stun": 1},
+	{"name": "Albert Einstein", "accent": Color("#f2cf76"), "passive": "Relativity: signature attacks deal 15% more damage.", "signature": "Relativity Wave", "signature_damage_multiplier": 1.15, "bonus_damage": 2, "bonus_stun": 3, "archetype": "einstein"}
 ]
 
 const STYLE_MOVES: Dictionary = {
@@ -136,6 +137,9 @@ static func moves_for_style(style: String, unlocked_ultimates: int = 0, signatur
 			"damage": 45 + index * 4,
 			"stun": 40,
 			"cost": 4,
+			"animation": "beam",
+			"projectile": true,
+			"projectile_range": 12.0,
 			"cue": name.to_upper(),
 			"challenge": style,
 			"signature": move_signature,
@@ -167,7 +171,7 @@ static func legends_arts(signature: String, unlocked_ultimates: int = 1, style: 
 		{"name": "Ki Blast", "kind": "attack", "tier": "Blast Arts", "damage": 14, "stun": 8, "cost": 1, "animation": "hadoken", "projectile": true, "projectile_range": 9.0, "cue": "KI BLAST"},
 		{"name": "Power Up", "kind": "buff", "tier": "Special Skill", "damage_boost": 1.25, "duration": 4.0, "cost": 1, "animation": "charge", "cue": "POWER UP"},
 		{"name": style_special, "kind": "attack", "tier": "Special Move", "damage": 42, "stun": 30, "cost": 3, "animation": "beam", "projectile": true, "projectile_range": 11.0, "signature": true, "cue": style_special.to_upper()},
-		{"name": move_name, "kind": "attack", "tier": "Special Move", "damage": 38, "stun": 26, "cost": 3, "animation": "beam", "projectile": true, "projectile_range": 11.0, "signature": true, "cue": move_name.to_upper()},
+		{"name": move_name, "kind": "attack", "tier": "Special Move", "damage": 38, "stun": 26, "cost": 3, "animation": "einstein_wave" if move_name == "Relativity Wave" else "beam", "projectile": true, "projectile_range": 11.0, "signature": true, "cue": move_name.to_upper()},
 		{"name": "Vanish Step", "kind": "dodge", "tier": "Special Skill", "stun": 0, "cost": 0, "cue": "VANISH"}
 	]
 	var ultimate_names: Array = ULTIMATE_NAMES.get(style, ULTIMATE_NAMES["Chess"])

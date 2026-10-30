@@ -6,9 +6,11 @@ const ComboLabScript = preload("res://scripts/combo_lab.gd")
 const StoryCampaignScript = preload("res://scripts/story_campaign.gd")
 const MainMenuScript = preload("res://scripts/main_menu.gd")
 const FIGHTER_SCENE: PackedScene = preload("res://assets/characters/fighter_ual2.glb")
+const EINSTEIN_FIGHTER_SCENE: PackedScene = preload("res://assets/characters/albert_einstein_chrono.glb")
 # New combat system components
 const MoveDataScript = preload("res://scripts/move_data.gd")
 const FighterCombatScript = preload("res://scripts/fighter_combat.gd")
+const EinsteinAbilityControllerScript = preload("res://scripts/einstein_ability_controller.gd")
 const DoubleFlickDodgeScript = preload("res://scripts/double_flick_dodge.gd")
 # Fighting system components
 const FightingInputBufferScript = preload("res://scripts/fighting_system/fighting_input_buffer.gd")
@@ -24,6 +26,7 @@ const NORMAL_DAMAGE_SCALE := 0.75
 const MAX_MP := 6.0
 const MAX_STUN := 100.0
 const PLAYER_SPEED := 5.5
+const PERFECT_PARRY_WINDOW_FRAMES := 6.0
 
 # Simple inline Health component
 class SimpleHealth extends Node:
@@ -151,12 +154,49 @@ const MAX_VANISH := 100.0
 const VANISH_DODGE_COST := 50.0
 
 # High-speed dash / flash-step
-const DASH_SPEED := 42.0
-const DASH_DURATION := 0.18
-const DASH_COOLDOWN := 0.5
-const AIR_DASH_SPEED := 30.0
+const DASH_SPEED := 24.0
+const DASH_DURATION := 0.16
+const DASH_COOLDOWN := 0.55
+const AIR_DASH_SPEED := 20.0
+const DASH_ATTACK_CLEARANCE := 1.35
 const SLAM_SPEED := 28.0
 const SLAM_SHOCKWAVE_RADIUS := 4.0
+
+# ── Rounds system ──
+const ROUND_DURATION_SECONDS := 99.0
+const ROUNDS_TO_WIN := 2
+# ── Elo system ──
+const ELO_START := 1000
+const ELO_K_FACTOR := 32.0
+const ELO_DIVISION_THRESHOLDS := [1200, 1400, 1600, 1800, 2000, 2200]
+# ── Guard crush ──
+const GUARD_MAX := 60.0
+const GUARD_DAMAGE_PER_HIT := 12.0
+const GUARD_CRUSH_RECOVERY := 2.5
+const GUARD_CRUSH_STUN := 1.8
+# ── Parkour / wall-run ──
+const WALL_RUN_SPEED := 6.0
+const WALL_RUN_DURATION := 1.2
+const WALL_JUMP_FORCE := 14.0
+const WALL_DETECT_DIST := 1.1
+# ── Movement tech ──
+const STRAFE_BOOST := 1.35
+const DASH_CANCEL_WINDOW := 0.08
+
+# ── Melee movement tech ──
+const AIR_DRIFT_SPEED := 8.0
+const WAVEDASH_SPEED := 16.0
+const WAVEDASH_DURATION := 0.12
+const FAST_FALL_MULTIPLIER := 2.5
+# ── Screen freeze / slow-mo ──
+const HIT_FREEZE_DURATION := 0.06
+const ULTIMATE_SLOW_MO_DURATION := 0.35
+const ULTIMATE_SLOW_MO_SCALE := 0.25
+
+# ── Art styles ──
+enum ArtStyle { SMOOTH, VOXEL, PIXEL }
+var art_style := ArtStyle.SMOOTH
+var art_style_shader: Shader
 
 var rng := RandomNumberGenerator.new()
 var player_data: Dictionary = {}
@@ -202,6 +242,7 @@ var player_recovery := 0.0
 var enemy_recovery := 0.0
 var stun_lock := 0.0
 var ai_clock := 1.0
+var ai_opening_delay := 0.0
 var mp_clash_cooldown := 0.0
 var mp_clash_clock := 0.0
 var mp_clash_active := false
@@ -234,10 +275,14 @@ var sprint_enabled := false
 var crouch_enabled := false
 var flight_enabled := false
 var training_mode := false
+var training_last_move_name := ""
+var training_last_frame_data: Dictionary = {}
+var training_last_result := ""
+var training_last_advantage_frames := 0
 var enemy_is_training := false
 var combo_lab_previous_challenge_state := false
 var show_hitboxes := false
-var player_character_index := 0
+var player_character_index := GameData.CHARACTERS.size() - 1
 var opponent_character_index := 1
 var player_last_punch_limb := "left"
 var player_last_kick_limb := "left"
@@ -250,11 +295,16 @@ var enemy_node: Node3D
 var arena_root: Node3D
 var camera: Camera3D
 var hud: Control
+var combo_counter_hud: ComboCounterHUD
+var battle_camera_controller: DBLegendsCameraController
+var match_director: MatchDirector
 var player_hp_bar: ProgressBar
 var player_mp_bar: ProgressBar
 var ultimate_button: Button
 var player_stun_bar: ProgressBar
 var player_ultimate_bar: ProgressBar
+var player_gravity_bar: ProgressBar
+var ultimate_cooldown_ring: TextureProgressBar
 var player_vanish_bar: ProgressBar
 var enemy_hp_bar: ProgressBar
 var enemy_mp_bar: ProgressBar
@@ -277,13 +327,21 @@ var player_dodge: Object
 var enemy_dodge: Object
 var hp_bar_tweens: Dictionary = {}
 var feedback_label: Label
+var developer_log_button: Button
+var developer_log_window: Window
+var developer_log_text: TextEdit
+var developer_log_status: Label
+var _logged_stick_sector := Vector2i(99, 99)
 var training_prompt_label: Label
+var training_frame_label: Label
 var player_title_label: Label
 var enemy_title_label: Label
 var cards_grid: GridContainer
 var equipped_grid: GridContainer
 var challenge_layer: ColorRect
 var clash_button: Button
+var art_style_button: Button
+var tag_button: Button
 var training_button: Button
 var sprint_button: Button
 var crouch_button: Button
@@ -332,6 +390,116 @@ var camera_fov_current := 45.0
 
 # Safeguard: never let hit-stop / time_scale stay frozen (real-time, not delta)
 var time_scale_stuck_started_msec := -1
+var screen_freeze_started_msec := -1
+
+# ── Rounds state ──
+var round_timer: RoundTimerLogic
+var rounds_to_win := ROUNDS_TO_WIN
+var player_round_wins := 0
+var enemy_round_wins := 0
+var current_round := 0
+var round_active := false
+var match_winner := 0  # 1 = player, -1 = enemy, 0 = none
+var round_timeout_pending := false
+# ── Guard crush state ──
+var player_guard_damage := 0.0
+var enemy_guard_damage := 0.0
+var player_guard_crushed := false
+var enemy_guard_crushed := false
+var player_guard_crush_timer := 0.0
+var enemy_guard_crush_timer := 0.0
+# ── Parkour / wall-run state ──
+var player_wall_normal := Vector3.ZERO
+var player_wall_run_timer := 0.0
+var player_is_wall_running := false
+var player_wall_jump_queued := false
+var enemy_wall_normal := Vector3.ZERO
+var enemy_wall_run_timer := 0.0
+var enemy_is_wall_running := false
+# ── Movement tech ──
+var player_strafe_boost_timer := 0.0
+var player_dash_cancel_queued := false
+var last_dash_end_pos := Vector3.ZERO
+
+# ── Melee movement tech ──
+var player_air_drift_timer := 0.0
+var player_air_drift_direction := Vector3.ZERO
+var player_wavedash_timer := 0.0
+var player_wavedash_direction := Vector3.ZERO
+var player_is_wavedashing := false
+var player_fast_fall := false
+var player_coyote_timer := 0.0
+var player_coyote_window := 0.1
+
+# ── Tag-team partner ──
+var tag_partner_node: Node3D
+var tag_partner_active := false
+var tag_partner_hp := MAX_HP
+var tag_partner_mp := 3.0
+var tag_partner_stun := MAX_STUN
+var tag_partner_character_index := 0
+var tag_partner_style := "Chess"
+var tag_cooldown := 0.0
+var tag_swap_lock := 0.0
+# ── Screen freeze / slow-mo ──
+var screen_freeze_timer := 0.0
+var slow_mo_timer := 0.0
+var slow_mo_target_scale := 1.0
+# ── Fluid trails ──
+var player_trail_node: Node3D
+var enemy_trail_node: Node3D
+var trail_segment_timer := 0.0
+# ── Replay system ──
+var replay_recording := false
+var replay_inputs: Array[Dictionary] = []
+var replay_playback := false
+var replay_input_index := 0
+var replay_frame := 0
+# ── Local multiplayer ──
+var player2_active := false
+var player2_joystick_vector := Vector2.ZERO
+var player2_dash_timer := 0.0
+var player2_dash_cooldown := 0.0
+var player2_is_dashing := false
+var player2_dash_direction := Vector3.ZERO
+# ── AI coach ──
+var coach_hint_timer := 0.0
+var coach_hint_text := ""
+var coach_last_advice_frame := 0
+# ── Data-driven move definitions ──
+var _custom_moves_database: Array = []
+var _custom_styles_database: Dictionary = {}
+# ── Isometric camera ──
+var isometric_mode := false
+var isometric_button: Button
+var camera_projection_perspective: bool = true
+# ── Map editor ──
+var map_editor_active := false
+var map_editor_button: Button
+var arena_pieces: Array[Node3D] = []
+var arena_piece_type := "wall"  # wall, platform
+var editor_hover_piece: Node3D
+var editor_placement_grid := 1.0
+# ── Ranked Elo ──
+var player_elo := 1000
+var enemy_elo := 1000
+var elo_divisions := ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Master", "Grandmaster"]
+var elo_division_index := 0
+var elo_button: Button
+var elo_display_label: Label
+# ── 2v2 co-op ──
+var team_mode_2v2 := false
+var enemy_partner_node: Node3D
+var enemy_partner_hp := MAX_HP
+var enemy_partner_mp := 3.0
+var enemy_partner_stun := MAX_STUN
+var enemy_partner_stun_lock := 0.0
+var enemy_partner_character_index := 1
+var enemy_partner_style := "Cards"
+var partner_hp_bar: ProgressBar
+var partner_mp_bar: ProgressBar
+var enemy_partner_hp_bar: ProgressBar
+var enemy_partner_mp_bar: ProgressBar
 
 func _ready() -> void:
 	# Mobile / low-end device optimizations
@@ -350,9 +518,25 @@ func _ready() -> void:
 	_load_progress()
 	_load_settings()
 	_load_loadouts()
+	_load_custom_moves()
 	_build_world()
 	_build_hud()
 	_init_fighting_systems()
+	# Round timer
+	round_timer = RoundTimerLogic.new()
+	round_timer.name = "RoundTimer"
+	add_child(round_timer)
+	round_timer.time_changed.connect(_on_round_time_changed)
+	round_timer.timed_out.connect(_on_round_timed_out)
+	# Match director (round win tracking)
+	match_director = MatchDirector.new()
+	match_director.name = "MatchDirector"
+	match_director.rounds_to_win = rounds_to_win
+	match_director.round_duration_seconds = int(ROUND_DURATION_SECONDS)
+	add_child(match_director)
+	match_director.round_started.connect(_on_round_started)
+	match_director.round_finished.connect(_on_round_finished)
+	match_director.match_finished.connect(_on_match_finished)
 	_start_match()
 	_rebuild_move_cards()
 	_open_main_menu()
@@ -374,6 +558,16 @@ func _limit_effect_lights(delta: float) -> void:
 func _play_sfx(sound_name: String, volume_db := -8.0, pitch_variation := 0.0) -> void:
 	get_node("/root/GameAudio").call("play_sfx", sound_name, volume_db, pitch_variation)
 
+func _screen_freeze(seconds: float) -> void:
+	screen_freeze_timer = maxf(screen_freeze_timer, seconds)
+	screen_freeze_started_msec = Time.get_ticks_msec()
+	Engine.time_scale = 0.0
+
+func _apply_slow_mo(seconds: float, scale: float = ULTIMATE_SLOW_MO_SCALE) -> void:
+	slow_mo_timer = seconds
+	slow_mo_target_scale = scale
+	Engine.time_scale = scale
+
 func _process(delta: float) -> void:
 	# Safeguard: restore time_scale if hit-stop left it frozen.
 	# Must use real clock — when time_scale is ~0, delta is also ~0 so a delta timer never fires.
@@ -389,13 +583,17 @@ func _process(delta: float) -> void:
 	else:
 		time_scale_stuck_started_msec = -1
 
+	# ── Replay playback ──
+	if replay_playback:
+		_replay_apply_input()
+
 	_limit_effect_lights(delta)
 	if main_menu_open or pause_menu_open:
 		_handle_debug_input()
 		return
 	_handle_debug_input()
 	_update_fighter_animations(delta)
-	_advance_attack_states()
+	_advance_attack_states(delta)
 	_update_fighter_state_machines(delta)
 	if mp_clash_active:
 		mp_clash_clock -= delta
@@ -424,6 +622,7 @@ func _process(delta: float) -> void:
 		enemy_vanish = minf(MAX_VANISH, enemy_vanish + delta * 16.0)
 	player_powerup_timer = maxf(0.0, player_powerup_timer - delta)
 	enemy_powerup_timer = maxf(0.0, enemy_powerup_timer - delta)
+	coach_hint_timer = maxf(0.0, coach_hint_timer - delta)
 	player_basic_combo_clock = maxf(0.0, player_basic_combo_clock - delta)
 	if player_basic_combo_clock <= 0.0:
 		player_basic_combo_last_action = ""
@@ -444,8 +643,56 @@ func _process(delta: float) -> void:
 		player_mp = minf(MAX_MP, player_mp + delta * charge_rate)
 		_update_hud()
 
+	# ── Screen freeze (real-time, independent of time_scale) ──
+	if screen_freeze_timer > 0.0:
+		if screen_freeze_started_msec >= 0 and Time.get_ticks_msec() - screen_freeze_started_msec >= int(screen_freeze_timer * 1000.0):
+			screen_freeze_timer = 0.0
+			screen_freeze_started_msec = -1
+			Engine.time_scale = 1.0
+	# ── Slow-mo ──
+	if slow_mo_timer > 0.0:
+		slow_mo_timer = maxf(0.0, slow_mo_timer - delta)
+		var current_scale := lerpf(1.0, slow_mo_target_scale, clampf(slow_mo_timer / ULTIMATE_SLOW_MO_DURATION, 0.0, 1.0))
+		Engine.time_scale = current_scale
+		if slow_mo_timer <= 0.0:
+			Engine.time_scale = 1.0
+			slow_mo_target_scale = 1.0
+	# ── Guard crush recovery ──
+	if player_guard_crushed:
+		player_guard_crush_timer = maxf(0.0, player_guard_crush_timer - delta)
+		if player_guard_crush_timer <= 0.0:
+			player_guard_crushed = false
+			player_guard_damage = 0.0
+			_show_feedback("GUARD RECOVERED")
+	if enemy_guard_crushed:
+		enemy_guard_crush_timer = maxf(0.0, enemy_guard_crush_timer - delta)
+		if enemy_guard_crush_timer <= 0.0:
+			enemy_guard_crushed = false
+			enemy_guard_damage = 0.0
+	# ── Round KO / ring-out checks ──
+	if round_active and not match_over and not challenge_active:
+		var player_ko := player_hp <= 0.0
+		var enemy_ko := enemy_hp <= 0.0
+		if player_ko or enemy_ko:
+			_handle_ko(1 if enemy_ko else -1)
+		elif not player_ko and not enemy_ko:
+			var player_out: bool = abs(player_node.position.x) > ARENA_LIMIT or abs(player_node.position.z) > ARENA_LIMIT
+			var enemy_out: bool = abs(enemy_node.position.x) > ARENA_LIMIT or abs(enemy_node.position.z) > ARENA_LIMIT
+			if player_out:
+				_handle_ko(-1)
+				_show_feedback("RING-OUT · OPPONENT WINS ROUND")
+			elif enemy_out:
+				_handle_ko(1)
+				_show_feedback("RING-OUT · PLAYER WINS ROUND")
+
 	_update_player_movement(delta)
-	_update_ai(delta)
+	if player2_active:
+		_update_player2(delta)
+	else:
+		_update_ai(delta)
+	_update_tag_cooldowns(delta)
+	if team_mode_2v2:
+		_update_enemy_partner(delta)
 	_update_fighter_facing(delta)
 	_update_camera(delta)
 	_update_hud()
@@ -1582,28 +1829,8 @@ func _activate_hitboxes(fighter: Node3D, hit_type: String, active: bool, limb: S
 					hitbox.monitoring = active
 
 func _update_combo_ui(count: int, is_player: bool) -> void:
-	if not is_instance_valid(hud):
-		return
-	var combo_label := hud.get_node_or_null("ModeInfo/ComboLabel") as Label
-	if not is_instance_valid(combo_label):
-		combo_label = Label.new()
-		combo_label.name = "ComboLabel"
-		combo_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		combo_label.add_theme_font_size_override("font_size", 24)
-		combo_label.add_theme_color_override("font_color", Color("#f4bf4e"))
-		combo_label.set_anchors_preset(Control.PRESET_TOP_WIDE)
-		combo_label.offset_top = 60
-		combo_label.offset_bottom = 100
-		hud.add_child(combo_label)
-	combo_label.text = "%d HIT COMBO!" % count
-	combo_label.visible = count > 1
-	if count <= 1:
-		return
-	var tween := create_tween()
-	tween.tween_property(combo_label, "modulate:a", 1.0, 0.1)
-	tween.tween_interval(0.8)
-	tween.tween_property(combo_label, "modulate:a", 0.0, 0.3)
-	tween.tween_callback(func() -> void: combo_label.visible = false)
+	if is_instance_valid(combo_counter_hud):
+		combo_counter_hud.show_combo(count, is_player)
 
 func _build_world() -> void:
 	arena_root = Node3D.new()
@@ -1690,6 +1917,10 @@ void fragment() {
 	camera.fov = 45.0
 	camera.current = true
 	arena_root.add_child(camera)
+	battle_camera_controller = DBLegendsCameraController.new()
+	battle_camera_controller.name = "BattleCameraController"
+	battle_camera_controller.camera = camera
+	arena_root.add_child(battle_camera_controller)
 
 func _add_arena_grid() -> void:
 	var mesh := ImmediateMesh.new()
@@ -1816,13 +2047,29 @@ func _make_material(color: Color, roughness := 0.7) -> StandardMaterial3D:
 	material.roughness = roughness
 	return material
 
-func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
-	var root := FIGHTER_SCENE.instantiate() as Node3D
+func _make_cooldown_ring_texture(color: Color) -> Texture2D:
+	var image := Image.create(64, 64, false, Image.FORMAT_RGBA8)
+	var center := Vector2(31.5, 31.5)
+	for y in range(64):
+		for x in range(64):
+			var distance := Vector2(x, y).distance_to(center)
+			if distance >= 23.0 and distance <= 30.0:
+				image.set_pixel(x, y, color)
+	return ImageTexture.create_from_image(image)
+
+func _create_fighter(name: String, accent: Color, shirt_color: Color, archetype: String = "") -> Node3D:
+	var fighter_scene := EINSTEIN_FIGHTER_SCENE if archetype == "einstein" else FIGHTER_SCENE
+	var root := fighter_scene.instantiate() as Node3D
 	if not is_instance_valid(root):
 		push_error("The selected stickman scene could not be instantiated.")
 		return Node3D.new()
 	root.name = name
 	root.scale = Vector3.ONE
+	root.set_meta("character_archetype", archetype)
+	if archetype == "einstein":
+		var ability_controller := EinsteinAbilityControllerScript.new()
+		ability_controller.name = "EinsteinAbilityController"
+		root.add_child(ability_controller)
 	var skeletons := root.find_children("*", "Skeleton3D", true, false)
 	if skeletons.is_empty():
 		push_error("The selected fighter model has no Skeleton3D.")
@@ -1842,29 +2089,32 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	outline_material.set_shader_parameter("outline_color", Color("#17151d"))
 	outline_material.set_shader_parameter("outline_width_pixels", 1.2 if OS.get_name() == "Android" or OS.get_name() == "iOS" else 2.5)
 	body_material.next_pass = outline_material
-	for body_mesh in root.find_children("*", "MeshInstance3D", true, false):
-		(body_mesh as MeshInstance3D).material_override = body_material
-	_add_fighter_costume(skeleton, accent, shirt_color)
+	if archetype != "einstein":
+		for body_mesh in root.find_children("*", "MeshInstance3D", true, false):
+			(body_mesh as MeshInstance3D).material_override = body_material
+	_apply_art_style(root, art_style)
+	_add_fighter_costume(skeleton, accent, shirt_color, archetype)
 
-	var eye_attachment := BoneAttachment3D.new()
-	eye_attachment.name = "GlowEyes"
-	eye_attachment.bone_name = "Head"
-	skeleton.add_child(eye_attachment)
-	var glow_material := StandardMaterial3D.new()
-	glow_material.albedo_color = Color("#fff2b0")
-	glow_material.emission_enabled = true
-	glow_material.emission = accent
-	glow_material.emission_energy_multiplier = 2.0
-	for eye_x in [-0.09, 0.09]:
-		var eye := MeshInstance3D.new()
-		var eye_mesh := _fx_sphere()
-		eye_mesh.radius = 0.045
-		eye_mesh.height = 0.035
-		eye.mesh = eye_mesh
-		eye.position = Vector3(eye_x, 0.015, 0.0)
-		eye.scale = Vector3(1.5, 0.7, 0.55)
-		eye.material_override = glow_material
-		eye_attachment.add_child(eye)
+	if archetype != "einstein":
+		var eye_attachment := BoneAttachment3D.new()
+		eye_attachment.name = "GlowEyes"
+		eye_attachment.bone_name = "Head"
+		skeleton.add_child(eye_attachment)
+		var glow_material := StandardMaterial3D.new()
+		glow_material.albedo_color = Color("#fff2b0")
+		glow_material.emission_enabled = true
+		glow_material.emission = accent
+		glow_material.emission_energy_multiplier = 2.0
+		for eye_x in [-0.09, 0.09]:
+			var eye := MeshInstance3D.new()
+			var eye_mesh := _fx_sphere()
+			eye_mesh.radius = 0.045
+			eye_mesh.height = 0.035
+			eye.mesh = eye_mesh
+			eye.position = Vector3(eye_x, 0.015, 0.0)
+			eye.scale = Vector3(1.5, 0.7, 0.55)
+			eye.material_override = glow_material
+			eye_attachment.add_child(eye)
 
 	# Add Health component from addon
 	var health = _create_health_component(root)
@@ -1909,8 +2159,10 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 		var animation := animation_player.get_animation(looping_animation) if animation_player.has_animation(looping_animation) else null
 		if animation != null:
 			animation.loop_mode = Animation.LOOP_LINEAR
-	if skeleton.find_bone("DEF-upper_arm.L") >= 0:
+	if skeleton.find_bone("upperarm_l") >= 0:
 		_add_fighter_procedural_animations(animation_player)
+		if archetype == "einstein":
+			animation_player.get_animation("Fighter/EinsteinIdle").loop_mode = Animation.LOOP_LINEAR
 	root.set_meta("anim_action", "idle")
 	root.set_meta("anim_elapsed", 0.0)
 	root.set_meta("anim_duration", 0.0)
@@ -1923,7 +2175,45 @@ func _create_fighter(name: String, accent: Color, shirt_color: Color) -> Node3D:
 	root.set_meta("fighter_skeleton_path", root.get_path_to(skeleton))
 	return root
 
-func _add_fighter_costume(skeleton: Skeleton3D, accent: Color, shirt_color: Color) -> void:
+func _apply_art_style(fighter: Node3D, style: int) -> void:
+	if not is_instance_valid(fighter):
+		return
+	match style:
+		ArtStyle.VOXEL:
+			# Voxel/blocky look: disable smoothing, force flat shading, crisp edges
+			for mesh in fighter.find_children("*", "MeshInstance3D", true, false):
+				var mat = mesh.get_material_override()
+				if mat == null:
+					var new_mat = StandardMaterial3D.new()
+					mesh.set_surface_material_override(0, new_mat)
+					mat = new_mat
+				if mat is StandardMaterial3D:
+					mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				var sm := StandardMaterial3D.new()
+				sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				mesh.set_surface_material_override(0, sm)
+			# Snap scale to grid-like blocks
+			for mesh in fighter.find_children("*", "MeshInstance3D", true, false):
+				mesh.scale = Vector3(1.0, 1.0, 1.0).snapped(Vector3(0.5, 0.5, 0.5))
+		ArtStyle.PIXEL:
+			# Pixel-art look: posterized colors via unshaded materials, bold outlines
+			for mesh in fighter.find_children("*", "MeshInstance3D", true, false):
+				var mat = mesh.get_material_override()
+				if mat is ShaderMaterial and mat.shader != null:
+					# Reduce lighting response for a flatter, pixelated appearance
+					mat.set_shader_parameter("base_color", mat.get_shader_parameter("base_color"))
+				var sm := StandardMaterial3D.new()
+				sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				sm.albedo_color = Color(1.0, 1.0, 1.0)
+				mesh.set_surface_material_override(1, sm)
+		ArtStyle.SMOOTH:
+			# Default toon shading already applied in _create_fighter
+			pass
+
+func _add_fighter_costume(skeleton: Skeleton3D, accent: Color, shirt_color: Color, archetype: String = "") -> void:
+	if archetype == "einstein":
+		# The Blender-exported Einstein GLB contains the full skinned costume.
+		return
 	# Lightweight bone-attached shapes add a readable martial-artist silhouette
 	# while leaving the imported skeleton, hitboxes, and animation clips in place.
 	var cloth := _make_material(shirt_color, 0.72)
@@ -2148,6 +2438,7 @@ func _on_player_dodged(direction: Vector2) -> void:
 		_show_feedback("VANISH STEP NEEDS 50% · WAIT FOR THE GAUGE")
 		return
 	player_vanish -= VANISH_DODGE_COST
+	GameplayLog.record("dodge", {"direction_x": snappedf(direction.x, 0.01), "direction_y": snappedf(direction.y, 0.01)})
 	player_vanish_regen_delay = 1.4
 	# Convert screen-space direction to world-space relative to camera
 	var cam := get_viewport().get_camera_3d()
@@ -2315,6 +2606,33 @@ func _add_fighter_procedural_animations(animation_player: AnimationPlayer) -> vo
 		"DEF-upper_arm.L": [Vector3.ZERO, Vector3(-0.4, 0.0, -0.3), Vector3(-0.5, 0.0, -0.4), Vector3(-0.4, 0.0, -0.3), Vector3.ZERO],
 		"DEF-upper_arm.R": [Vector3.ZERO, Vector3(-0.4, 0.0, 0.3), Vector3(-0.5, 0.0, 0.4), Vector3(-0.4, 0.0, 0.3), Vector3.ZERO]
 	}, [0.0, 0.2, 0.5, 0.8, 1.0])
+	_add_bone_pose_animation(library, "EinsteinIdle", 2.4, {
+		"DEF-spine.001": [Vector3.ZERO, Vector3(0.025, 0.0, 0.0), Vector3.ZERO],
+		"DEF-spine.002": [Vector3.ZERO, Vector3(0.04, 0.0, 0.0), Vector3.ZERO],
+		# The imported body starts with arms straight out. Rotate around each
+		# arm's local Z axis to lower the elbows into a readable fighting guard.
+		"DEF-upper_arm.L": [Vector3(-0.12, 0.0, -0.78), Vector3(-0.15, 0.0, -0.82), Vector3(-0.12, 0.0, -0.78)],
+		"DEF-forearm.L": [Vector3(0.15, 0.0, 0.0), Vector3(0.18, 0.0, 0.0), Vector3(0.15, 0.0, 0.0)],
+		"DEF-upper_arm.R": [Vector3(-0.12, 0.0, 0.78), Vector3(-0.15, 0.0, 0.82), Vector3(-0.12, 0.0, 0.78)],
+		"DEF-forearm.R": [Vector3(0.15, 0.0, 0.0), Vector3(0.18, 0.0, 0.0), Vector3(0.15, 0.0, 0.0)]
+	}, [0.0, 0.5, 1.0])
+	library.get_animation("EinsteinIdle").loop_mode = Animation.LOOP_LINEAR
+	_add_bone_pose_animation(library, "EinsteinWave", 0.68, {
+		"DEF-upper_arm.L": [Vector3.ZERO, Vector3(-0.38, 0.0, -0.3), Vector3(-0.98, 0.0, -0.32), Vector3(-0.72, 0.0, -0.22), Vector3.ZERO],
+		"DEF-forearm.L": [Vector3.ZERO, Vector3(0.38, 0.0, 0.0), Vector3(0.78, 0.0, 0.0), Vector3(0.42, 0.0, 0.0), Vector3.ZERO],
+		"DEF-upper_arm.R": [Vector3.ZERO, Vector3(-0.38, 0.0, 0.3), Vector3(-0.98, 0.0, 0.32), Vector3(-0.72, 0.0, 0.22), Vector3.ZERO],
+		"DEF-forearm.R": [Vector3.ZERO, Vector3(0.38, 0.0, 0.0), Vector3(0.78, 0.0, 0.0), Vector3(0.42, 0.0, 0.0), Vector3.ZERO],
+		"DEF-spine.001": [Vector3.ZERO, Vector3(-0.05, 0.0, 0.0), Vector3(-0.12, 0.0, 0.0), Vector3(-0.06, 0.0, 0.0), Vector3.ZERO],
+		"DEF-spine.002": [Vector3.ZERO, Vector3(-0.08, 0.0, 0.0), Vector3(-0.18, 0.0, 0.0), Vector3(-0.1, 0.0, 0.0), Vector3.ZERO]
+	}, [0.0, 0.18, 0.42, 0.72, 1.0])
+	_add_bone_pose_animation(library, "Knockout", 0.9, {
+		"DEF-spine.001": [Vector3.ZERO, Vector3(0.08, 0.0, 0.0), Vector3(0.18, 0.0, 0.0), Vector3(0.12, 0.0, 0.0), Vector3.ZERO],
+		"DEF-spine.002": [Vector3.ZERO, Vector3(0.22, 0.0, 0.0), Vector3(0.32, 0.0, 0.0), Vector3(0.2, 0.0, 0.0), Vector3.ZERO],
+		"DEF-upper_arm.L": [Vector3.ZERO, Vector3(-0.4, 0.0, -0.5), Vector3(-0.8, 0.0, -0.75), Vector3(-0.65, 0.0, -0.6), Vector3.ZERO],
+		"DEF-upper_arm.R": [Vector3.ZERO, Vector3(-0.4, 0.0, 0.5), Vector3(-0.8, 0.0, 0.75), Vector3(-0.65, 0.0, 0.6), Vector3.ZERO],
+		"DEF-forearm.L": [Vector3.ZERO, Vector3(-0.15, 0.0, 0.0), Vector3(-0.35, 0.0, 0.0), Vector3(-0.2, 0.0, 0.0), Vector3.ZERO],
+		"DEF-forearm.R": [Vector3.ZERO, Vector3(-0.15, 0.0, 0.0), Vector3(-0.35, 0.0, 0.0), Vector3(-0.2, 0.0, 0.0), Vector3.ZERO]
+	}, [0.0, 0.24, 0.52, 0.78, 1.0])
 	if animation_player.has_animation_library("Fighter"):
 		animation_player.remove_animation_library("Fighter")
 	var error := animation_player.add_animation_library("Fighter", library)
@@ -2338,13 +2656,23 @@ func _add_bone_pose_animation(library: AnimationLibrary, name: String, duration:
 	var animation := Animation.new()
 	animation.length = duration
 	animation.loop_mode = Animation.LOOP_NONE
+	var pose_bone_names := {
+		"DEF-spine.001": "spine_01", "DEF-spine.002": "spine_02",
+		"DEF-upper_arm.L": "upperarm_l", "DEF-upper_arm.R": "upperarm_r",
+		"DEF-forearm.L": "lowerarm_l", "DEF-forearm.R": "lowerarm_r",
+		"DEF-hand.L": "hand_l", "DEF-hand.R": "hand_r",
+		"DEF-thigh.L": "thigh_l", "DEF-thigh.R": "thigh_r",
+		"DEF-shin.L": "calf_l", "DEF-shin.R": "calf_r",
+		"DEF-foot.L": "foot_l", "DEF-foot.R": "foot_r"
+	}
 	for bone_name in poses:
 		var key_rotations: Array = poses[bone_name]
 		if key_rotations.size() != key_count:
 			push_error("Unable to add procedural animation %s: pose count differs for %s." % [name, bone_name])
 			return
 		var track := animation.add_track(Animation.TYPE_ROTATION_3D)
-		animation.track_set_path(track, NodePath("Rig/Skeleton3D:" + str(bone_name)))
+		var rig_bone_name := str(pose_bone_names.get(str(bone_name), str(bone_name)))
+		animation.track_set_path(track, NodePath("Armature/Skeleton3D:" + rig_bone_name))
 		for key_index in range(key_count):
 			animation.track_insert_key(track, duration * key_time_ratios[key_index], Quaternion.from_euler(key_rotations[key_index]))
 	var error := library.add_animation(name, animation)
@@ -2358,15 +2686,244 @@ func _build_fighters() -> void:
 		enemy_node.queue_free()
 	var player: Dictionary = GameData.CHARACTERS[player_character_index]
 	var enemy: Dictionary = GameData.CHARACTERS[opponent_character_index]
-	player_node = _create_fighter("PlayerFighter", player.accent, Color("#b97720"))
-	enemy_node = _create_fighter("AIFighter", enemy.accent, Color("#38151d"))
+	player_node = _create_fighter("PlayerFighter", player.accent, Color("#b97720"), str(player.get("archetype", "")))
+	enemy_node = _create_fighter("AIFighter", enemy.accent, Color("#38151d"), str(enemy.get("archetype", "")))
 	player_data = player
 	opponent_data = enemy
+	var einstein_abilities := player_node.get_node_or_null("EinsteinAbilityController") as Node
+	if is_instance_valid(einstein_abilities):
+		einstein_abilities.gravity_updated.connect(_on_einstein_gravity_updated)
+		einstein_abilities.cooldown_updated.connect(_on_einstein_cooldown_updated)
+		_on_einstein_gravity_updated(float(einstein_abilities.get("gravity_meter")), 100.0)
+		_on_einstein_cooldown_updated(float(einstein_abilities.get("cooldown_remaining")), 12.0)
 	arena_root.add_child(player_node)
 	arena_root.add_child(enemy_node)
+	if str(player.get("archetype", "")) == "einstein":
+		_play_fighter_action(player_node, "idle", 2.4)
+	if str(enemy.get("archetype", "")) == "einstein":
+		_play_fighter_action(enemy_node, "idle", 2.4)
 	player_node.position = Vector3(-2.0, 0.0, 0.0)
 	enemy_node.position = Vector3(2.0, 0.0, -0.25)
+	if is_instance_valid(battle_camera_controller):
+		battle_camera_controller.set_targets(player_node, enemy_node)
 	_update_fighter_facing()
+
+func _init_tag_partner() -> void:
+	if tag_partner_active and is_instance_valid(tag_partner_node):
+		return
+	var partner := GameData.CHARACTERS[tag_partner_character_index]
+	tag_partner_node = _create_fighter("TagPartner", partner.accent, Color("#4a3820"), str(partner.get("archetype", "")))
+	tag_partner_node.position = Vector3(-4.0, 0.0, 0.0)
+	tag_partner_node.set_meta("tag_partner", true)
+	# Hide partner until tagged in
+	tag_partner_node.visible = false
+	var combat := tag_partner_node.get_node_or_null("FighterCombat") as Object
+	if is_instance_valid(combat):
+		combat.max_hp = MAX_HP
+		combat.hp = MAX_HP
+	arena_root.add_child(tag_partner_node)
+	_play_fighter_action(tag_partner_node, "idle", 0.2)
+
+func _swap_tag_partner() -> void:
+	if tag_cooldown > 0.0 or tag_swap_lock > 0.0:
+		return
+	if not is_instance_valid(tag_partner_node) or not tag_partner_active:
+		return
+	if not is_instance_valid(player_node):
+		return
+	# Swap positions: current player goes back, partner comes forward
+	var old_pos := player_node.global_position
+	var new_pos := tag_partner_node.global_position
+	# Swap HP/MP between active and partner
+	var temp_hp := player_hp
+	var temp_mp := player_mp
+	var temp_stun := player_stun
+	player_hp = tag_partner_hp
+	player_mp = tag_partner_mp
+	player_stun = tag_partner_stun
+	tag_partner_hp = temp_hp
+	tag_partner_mp = temp_mp
+	tag_partner_stun = temp_stun
+	# Swap visibility
+	var was_visible := player_node.visible
+	player_node.visible = tag_partner_node.visible
+	tag_partner_node.visible = was_visible
+	# Swap node references
+	var old_player := player_node
+	player_node = tag_partner_node
+	tag_partner_node = old_player
+	tag_partner_node.name = "TagPartner"
+	player_node.name = "PlayerFighter"
+	# Update combat references
+	_update_hud()
+	_show_feedback("TAG SWAP · PARTNER IN")
+	tag_cooldown = 4.0
+	tag_swap_lock = 1.5
+	# Re-target camera
+	if is_instance_valid(battle_camera_controller):
+		battle_camera_controller.set_targets(player_node, enemy_node)
+	_update_fighter_facing()
+
+func _update_tag_cooldowns(delta: float) -> void:
+	tag_cooldown = maxf(0.0, tag_cooldown - delta)
+	tag_swap_lock = maxf(0.0, tag_swap_lock - delta)
+	if tag_partner_active and is_instance_valid(tag_partner_node):
+		# Regenerate partner MP over time
+		tag_partner_mp = minf(MAX_MP, tag_partner_mp + delta * 0.4)
+
+func _toggle_art_style() -> void:
+	art_style = (art_style + 1) % 3
+	var style_name: String = ["SMOOTH", "VOXEL", "PIXEL"][art_style]
+	if is_instance_valid(art_style_button):
+		art_style_button.text = "STYLE · %s" % style_name
+	# Re-apply art style to both fighters
+	if is_instance_valid(player_node):
+		_apply_art_style(player_node, art_style)
+	if is_instance_valid(enemy_node):
+		_apply_art_style(enemy_node, art_style)
+	if is_instance_valid(tag_partner_node):
+		_apply_art_style(tag_partner_node, art_style)
+	_show_feedback("ART STYLE · %s" % style_name)
+
+func _elo_division_for_rating(rating: int) -> int:
+	for index in range(ELO_DIVISION_THRESHOLDS.size()):
+		if rating < ELO_DIVISION_THRESHOLDS[index]:
+			return index
+	return ELO_DIVISION_THRESHOLDS.size()
+
+func _apply_elo_change(player_won: bool) -> void:
+	var expected := 1.0 / (1.0 + pow(10.0, (enemy_elo - player_elo) / 400.0))
+	var actual := 1.0 if player_won else 0.0
+	var change: int = int(round(ELO_K_FACTOR * (actual - expected)))
+	player_elo = clampi(player_elo + change, 100, 9999)
+	enemy_elo = clampi(enemy_elo - change, 100, 9999)
+	var old_div := _elo_division_for_rating(player_elo - change)
+	var new_div := _elo_division_for_rating(player_elo)
+	if new_div > old_div:
+		_show_feedback("ELO %d · DIVISION UP · %s" % [player_elo, elo_divisions[new_div]])
+	elif new_div < old_div:
+		_show_feedback("ELO %d · DIVISION DOWN · %s" % [player_elo, elo_divisions[new_div]])
+	else:
+		_show_feedback("ELO %d · %s" % [player_elo, "GAINED" if change > 0 else "LOST"])
+
+func _toggle_isometric_camera() -> void:
+	isometric_mode = not isometric_mode
+	if is_instance_valid(camera):
+		if isometric_mode:
+			camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+			camera.size = 14.0
+			camera.global_transform = Transform3D(Basis(Vector3.RIGHT, -PI / 4.0) * Basis(Vector3.UP, -PI / 4.0), Vector3(0.0, 12.0, -12.0))
+			camera.look_at(Vector3(0.0, 0.0, 0.0), Vector3.UP)
+			_show_feedback("CAMERA · ISOMETRIC")
+		else:
+			camera.projection = Camera3D.PROJECTION_PERSPECTIVE
+			_show_feedback("CAMERA · PERSPECTIVE")
+
+func _toggle_map_editor() -> void:
+	map_editor_active = not map_editor_active
+	if map_editor_active:
+		_show_feedback("MAP EDITOR · E=PLACE WALL · R=REMOVE")
+	else:
+		_show_feedback("MAP EDITOR · OFF")
+		_editor_clear_hover()
+
+func _editor_clear_hover() -> void:
+	if is_instance_valid(editor_hover_piece):
+		editor_hover_piece.queue_free()
+		editor_hover_piece = null
+
+func _place_arena_piece() -> void:
+	if not map_editor_active:
+		return
+	var piece := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(1.0, 0.5, 1.0)
+	piece.mesh = box
+	piece.global_position = Vector3(floor(player_node.global_position.x / editor_placement_grid) * editor_placement_grid + editor_placement_grid * 0.5, 0.25, floor(player_node.global_position.z / editor_placement_grid) * editor_placement_grid + editor_placement_grid * 0.5)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color("#ffd45c")
+	mat.emission_enabled = true
+	mat.emission = Color("#ffd45c")
+	mat.emission_energy_multiplier = 1.5
+	piece.material_override = mat
+	arena_root.add_child(piece)
+	arena_pieces.append(piece)
+
+func _remove_arena_piece() -> void:
+	if not map_editor_active or arena_pieces.is_empty():
+		return
+	var last: Node3D = arena_pieces.pop_back()
+	if is_instance_valid(last):
+		last.queue_free()
+
+func _save_arena_layout() -> void:
+	var data := []
+	for piece in arena_pieces:
+		if is_instance_valid(piece):
+			data.append({"x": round(piece.global_position.x), "y": round(piece.global_position.y), "z": round(piece.global_position.z)})
+	var file := FileAccess.open("user://arena_layout.json", FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(data))
+		file.close()
+		_show_feedback("ARENA LAYOUT SAVED · %d pieces" % data.size())
+
+func _load_arena_layout() -> void:
+	var path := "user://arena_layout.json"
+	if not FileAccess.file_exists(path):
+		_show_feedback("NO ARENA LAYOUT SAVED")
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return
+	var json := JSON.new()
+	var err := json.parse(file.get_as_text())
+	file.close()
+	if err != OK:
+		return
+	for piece in arena_pieces:
+		if is_instance_valid(piece):
+			piece.queue_free()
+	arena_pieces.clear()
+	for entry in json.data:
+		var piece := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(1.0, 0.5, 1.0)
+		piece.mesh = box
+		piece.global_position = Vector3(entry.x, entry.y, entry.z)
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = Color("#ffd45c")
+		mat.emission_enabled = true
+		mat.emission = Color("#ffd45c")
+		mat.emission_energy_multiplier = 1.5
+		piece.material_override = mat
+		arena_root.add_child(piece)
+		arena_pieces.append(piece)
+	_show_feedback("ARENA LAYOUT LOADED · %d pieces" % arena_pieces.size())
+
+func _init_enemy_partner() -> void:
+	if not team_mode_2v2 or is_instance_valid(enemy_partner_node):
+		return
+	var partner := GameData.CHARACTERS[enemy_partner_character_index]
+	enemy_partner_node = _create_fighter("EnemyPartner", partner.accent, Color("#1d1a2a"), str(partner.get("archetype", "")))
+	enemy_partner_node.position = Vector3(4.0, 0.0, -1.0)
+	enemy_partner_node.set_meta("enemy_partner", true)
+	arena_root.add_child(enemy_partner_node)
+	_play_fighter_action(enemy_partner_node, "idle", 0.2)
+
+func _update_enemy_partner(delta: float) -> void:
+	if not team_mode_2v2 or not is_instance_valid(enemy_partner_node) or not is_instance_valid(player_node):
+		return
+	if enemy_partner_stun_lock > 0.0:
+		return
+	var dist := enemy_partner_node.global_position.distance_to(player_node.global_position)
+	if dist > 3.0:
+		var dir := (player_node.global_position - enemy_partner_node.global_position).normalized()
+		dir.y = 0.0
+		var step := minf(PLAYER_SPEED * delta, dist - 1.5)
+		_move_fighter(enemy_partner_node, player_node, dir * step)
+		_set_locomotion(enemy_partner_node, 0.6)
+	else:
+		_set_locomotion(enemy_partner_node, 0.0)
 
 func _build_hud() -> void:
 	var layer := CanvasLayer.new()
@@ -2377,11 +2934,16 @@ func _build_hud() -> void:
 	hud.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(hud)
+	combo_counter_hud = ComboCounterHUD.new()
+	combo_counter_hud.name = "ComboCounterHUD"
+	hud.add_child(combo_counter_hud)
 	_build_top_hud()
 	_build_move_panel()
 	_build_action_buttons()
 	_build_joystick()
 	_build_bottom_info()
+	_build_developer_log_viewer()
+	_build_training_frame_display()
 	_build_challenge_layer()
 	_build_combo_lab()
 	_build_story_campaign()
@@ -2712,7 +3274,7 @@ func _build_top_hud() -> void:
 	row.offset_left = 12
 	row.offset_top = 10
 	row.offset_right = -12
-	row.offset_bottom = 90
+	row.offset_bottom = 110
 	row.add_theme_constant_override("separation", 12)
 	hud.add_child(row)
 
@@ -2728,6 +3290,30 @@ func _build_top_hud() -> void:
 	row.add_child(player_panel)
 	row.add_child(versus)
 	row.add_child(enemy_panel)
+	# ── Round info ──
+	var round_info := VBoxContainer.new()
+	round_info.name = "RoundInfo"
+	round_info.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	round_info.offset_left = -150
+	round_info.offset_right = 150
+	round_info.offset_top = 10
+	round_info.offset_bottom = 70
+	round_info.add_theme_constant_override("separation", 4)
+	var round_label := Label.new()
+	round_label.name = "RoundLabel"
+	round_label.text = "ROUND 1"
+	round_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	round_label.add_theme_font_size_override("font_size", 20)
+	round_label.add_theme_color_override("font_color", Color("#f4bf4e"))
+	var round_timer_label := Label.new()
+	round_timer_label.name = "RoundTimer"
+	round_timer_label.text = "TIME 99"
+	round_timer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	round_timer_label.add_theme_font_size_override("font_size", 20)
+	round_timer_label.add_theme_color_override("font_color", Color("#ffffff"))
+	round_info.add_child(round_label)
+	round_info.add_child(round_timer_label)
+	hud.add_child(round_info)
 	player_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	enemy_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
@@ -2784,6 +3370,15 @@ func _make_fighter_hud(side_name: String, is_player: bool) -> Control:
 	ultimate_row.add_child(ultimate_label)
 	ultimate_row.add_child(ultimate)
 	box.add_child(ultimate_row)
+	var gravity := ProgressBar.new()
+	gravity.name = "GravityMeter"
+	gravity.min_value = 0.0
+	gravity.max_value = 100.0
+	gravity.value = 0.0
+	gravity.show_percentage = false
+	gravity.tooltip_text = "Gravity · landed attacks charge Albert's Big Bang"
+	_add_labeled_meter(box, "GRAVITY", gravity)
+	gravity.get_parent().visible = is_player and str(GameData.CHARACTERS[player_character_index].get("archetype", "")) == "einstein"
 	var stun := ProgressBar.new()
 	stun.name = "Stun"
 	stun.min_value = 0
@@ -2803,6 +3398,7 @@ func _make_fighter_hud(side_name: String, is_player: bool) -> Control:
 		player_hp_bar = health
 		player_mp_bar = mana
 		player_ultimate_bar = ultimate
+		player_gravity_bar = gravity
 		player_stun_bar = stun
 		player_vanish_bar = vanish
 	else:
@@ -2948,13 +3544,71 @@ func _build_action_buttons() -> void:
 	column.add_child(charge)
 	ultimate_button = _make_action_button("ULTIMATE  ·  0/4", Color("#b44c3e"))
 	ultimate_button.name = "UltimateButton"
-	ultimate_button.pressed.connect(_use_equipped_ultimate)
-	column.add_child(ultimate_button)
+	ultimate_button.pressed.connect(_on_ultimate_button_pressed)
+	ultimate_button.button_down.connect(_on_ultimate_button_down)
+	ultimate_button.button_up.connect(_on_ultimate_button_up)
+	var ultimate_row := HBoxContainer.new()
+	ultimate_row.name = "UltimateActionRow"
+	ultimate_row.add_theme_constant_override("separation", 5)
+	ultimate_cooldown_ring = TextureProgressBar.new()
+	ultimate_cooldown_ring.name = "RadialCooldownOverlay"
+	ultimate_cooldown_ring.custom_minimum_size = Vector2(32, 32)
+	ultimate_cooldown_ring.size = Vector2(32, 32)
+	ultimate_cooldown_ring.min_value = 0.0
+	ultimate_cooldown_ring.max_value = EinsteinAbilityControllerScript.ULTIMATE_COOLDOWN
+	ultimate_cooldown_ring.fill_mode = TextureProgressBar.FILL_CLOCKWISE
+	ultimate_cooldown_ring.texture_under = _make_cooldown_ring_texture(Color("#38414d"))
+	ultimate_cooldown_ring.texture_progress = _make_cooldown_ring_texture(Color("#40d9ff"))
+	ultimate_cooldown_ring.tint_progress = Color.WHITE
+	ultimate_cooldown_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ultimate_cooldown_ring.visible = false
+	ultimate_row.add_child(ultimate_cooldown_ring)
+	ultimate_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ultimate_row.add_child(ultimate_button)
+	column.add_child(ultimate_row)
 	clash_button = _make_action_button("MP CLASH", Color("#7e59b5"))
 	clash_button.pressed.connect(_start_mp_clash)
 	clash_button.tooltip_text = "Spend low MP to challenge the AI in a timing clash."
 	clash_button.visible = true
 	column.add_child(clash_button)
+	# ── Art style toggle ──
+	art_style_button = _make_action_button("STYLE · SMOOTH", Color("#ffd45c"))
+	art_style_button.pressed.connect(_toggle_art_style)
+	art_style_button.tooltip_text = "Cycle fighter art style: Smooth → Voxel → Pixel."
+	column.add_child(art_style_button)
+	# ── Tag-team partner ──
+	tag_button = _make_action_button("TAG · PARTNER", Color("#4a90e2"))
+	tag_button.pressed.connect(_swap_tag_partner)
+	tag_button.tooltip_text = "Swap with your tag-team partner (cooldown 4s)."
+	tag_button.visible = tag_partner_active
+	column.add_child(tag_button)
+	# ── Isometric camera ──
+	isometric_button = _make_action_button("CAMERA · ISO", Color("#91e596"))
+	isometric_button.pressed.connect(_toggle_isometric_camera)
+	isometric_button.tooltip_text = "Toggle perspective / isometric camera view."
+	column.add_child(isometric_button)
+	# ── Map editor ──
+	map_editor_button = _make_action_button("EDITOR · OFF", Color("#ffd45c"))
+	map_editor_button.pressed.connect(_toggle_map_editor)
+	map_editor_button.tooltip_text = "Arena map editor: E to place wall, R to remove."
+	column.add_child(map_editor_button)
+	# ── Elo rank ──
+	elo_button = _make_action_button("ELO · 1000", Color("#f4bf4e"))
+	elo_button.tooltip_text = "Current ranked Elo rating."
+	column.add_child(elo_button)
+	elo_display_label = Label.new()
+	elo_display_label.text = "Division: Bronze"
+	elo_display_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	elo_display_label.add_theme_font_size_override("font_size", 10)
+	elo_display_label.add_theme_color_override("font_color", Color("#f4bf4e"))
+	column.add_child(elo_display_label)
+	# ── Movement tech hints ──
+	var movetech_hint := Label.new()
+	movetech_hint.text = "TECH: WAVEDASH (dash+down) · AIR DRIFT · FAST-FALL (hold back in air)"
+	movetech_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	movetech_hint.add_theme_font_size_override("font_size", 10)
+	movetech_hint.add_theme_color_override("font_color", Color("#88c0ff"))
+	column.add_child(movetech_hint)
 
 func _make_action_button(text: String, color: Color) -> Button:
 	var button := Button.new()
@@ -3007,9 +3661,9 @@ func _build_bottom_info() -> void:
 	info.name = "ModeInfo"
 	info.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	info.offset_left = 14
-	info.offset_top = 100
+	info.offset_top = 116
 	info.offset_right = -14
-	info.offset_bottom = 128
+	info.offset_bottom = 144
 	hud.add_child(info)
 	feedback_label = Label.new()
 	feedback_label.text = "MOVE IN WITH THE JOYSTICK · STRIKE WHEN CLOSE"
@@ -3034,7 +3688,7 @@ func _build_bottom_info() -> void:
 	var stats := Label.new()
 	stats.name = "ProgressInfo"
 	stats.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	stats.custom_minimum_size.x = 180
+	stats.custom_minimum_size.x = 185
 	stats.add_theme_font_size_override("font_size", 12)
 	info.add_child(stats)
 	games_button = _make_action_button("BOARD GAMES", Color("#986bba"))
@@ -3045,6 +3699,93 @@ func _build_bottom_info() -> void:
 	pause_button.custom_minimum_size = Vector2(78, 30)
 	pause_button.pressed.connect(_open_pause_menu)
 	info.add_child(pause_button)
+	if OS.is_debug_build():
+		developer_log_button = _make_action_button("DEV LOG · F3", Color("#536b83"))
+		developer_log_button.custom_minimum_size = Vector2(112, 30)
+		developer_log_button.pressed.connect(_toggle_developer_log)
+		info.add_child(developer_log_button)
+
+func _build_developer_log_viewer() -> void:
+	if not OS.is_debug_build():
+		return
+	developer_log_window = Window.new()
+	developer_log_window.title = "Gameplay Event Log · Development"
+	developer_log_window.size = Vector2i(900, 620)
+	developer_log_window.min_size = Vector2i(560, 360)
+	developer_log_window.close_requested.connect(func() -> void: developer_log_window.hide())
+	hud.add_child(developer_log_window)
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	for edge in ["left", "right", "top", "bottom"]:
+		margin.add_theme_constant_override("margin_" + edge, 12)
+	developer_log_window.add_child(margin)
+	var column := VBoxContainer.new()
+	margin.add_child(column)
+	developer_log_status = Label.new()
+	developer_log_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(developer_log_status)
+	developer_log_text = TextEdit.new()
+	developer_log_text.editable = false
+	developer_log_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	developer_log_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	column.add_child(developer_log_text)
+	var buttons := HBoxContainer.new()
+	column.add_child(buttons)
+	var refresh := Button.new()
+	refresh.text = "REFRESH"
+	refresh.pressed.connect(_refresh_developer_log)
+	buttons.add_child(refresh)
+	var copy := Button.new()
+	copy.text = "COPY LOG"
+	copy.pressed.connect(func() -> void: DisplayServer.clipboard_set(GameplayLog.recent_text(1200)))
+	buttons.add_child(copy)
+	var spacer := Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	buttons.add_child(spacer)
+	var close := Button.new()
+	close.text = "CLOSE"
+	close.pressed.connect(func() -> void: developer_log_window.hide())
+	buttons.add_child(close)
+
+func _toggle_developer_log() -> void:
+	if not OS.is_debug_build() or not is_instance_valid(developer_log_window):
+		return
+	if developer_log_window.visible:
+		developer_log_window.hide()
+	else:
+		_refresh_developer_log()
+		developer_log_window.popup_centered(Vector2i(900, 620))
+
+func _refresh_developer_log() -> void:
+	if not is_instance_valid(developer_log_text):
+		return
+	if is_instance_valid(developer_log_status):
+		var storage := "file: %s" % GameplayLog.log_path_absolute() if GameplayLog.persistence_available else "memory buffer only (file unavailable): %s" % GameplayLog.log_path_absolute()
+		developer_log_status.text = "Recent events · %s" % storage
+	developer_log_text.text = GameplayLog.recent_text(700)
+	developer_log_text.scroll_vertical = developer_log_text.get_line_count()
+
+func _build_training_frame_display() -> void:
+	var panel := PanelContainer.new()
+	panel.name = "TrainingFrameData"
+	panel.anchor_left = 0.5
+	panel.anchor_right = 0.5
+	panel.offset_left = -235
+	panel.offset_right = 235
+	panel.offset_top = 150
+	panel.offset_bottom = 190
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.visible = false
+	panel.add_theme_stylebox_override("panel", _panel_style(Color(0.025, 0.055, 0.065, 0.78)))
+	hud.add_child(panel)
+	training_frame_label = Label.new()
+	training_frame_label.name = "FrameReadout"
+	training_frame_label.text = "FRAME DATA · LAND AN ATTACK TO SEE ITS TIMING"
+	training_frame_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	training_frame_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	training_frame_label.add_theme_font_size_override("font_size", 11)
+	training_frame_label.add_theme_color_override("font_color", Color("#e9e6d8"))
+	panel.add_child(training_frame_label)
 
 func _build_challenge_layer() -> void:
 	challenge_layer = ColorRect.new()
@@ -3150,6 +3891,7 @@ func _start_match() -> void:
 	stun_lock = 0.0
 	challenge_cost = 0.0
 	ai_clock = float(_ai_profile().decision_interval)
+	ai_opening_delay = 0.7
 	ai_decision_timer = 0.0
 	ai_defense_clock = 0.0
 	enemy_guard_timer = 0.0
@@ -3168,7 +3910,41 @@ func _start_match() -> void:
 	else:
 		Engine.time_scale = 1.0
 	time_scale_stuck_started_msec = -1
+	# Reset per-round guard crush / wall state but keep round wins across rounds
+	player_guard_damage = 0.0
+	enemy_guard_damage = 0.0
+	player_guard_crushed = false
+	enemy_guard_crushed = false
+	player_guard_crush_timer = 0.0
+	enemy_guard_crush_timer = 0.0
+	player_wall_normal = Vector3.ZERO
+	player_wall_run_timer = 0.0
+	player_is_wall_running = false
+	player_wall_jump_queued = false
+	enemy_wall_normal = Vector3.ZERO
+	enemy_wall_run_timer = 0.0
+	enemy_is_wall_running = false
+	player_strafe_boost_timer = 0.0
+	player_dash_cancel_queued = false
+	last_dash_end_pos = Vector3.ZERO
+	screen_freeze_timer = 0.0
+	slow_mo_timer = 0.0
+	slow_mo_target_scale = 1.0
+	trail_segment_timer = 0.0
+	round_timeout_pending = false
 	_build_fighters()
+	if tag_partner_active:
+		_init_tag_partner()
+	if team_mode_2v2:
+		_init_enemy_partner()
+	GameplayLog.begin_match({
+		"player": str(player_data.get("name", "Player")),
+		"player_style": player_style,
+		"opponent": str(opponent_data.get("name", "Opponent")),
+		"opponent_style": opponent_style,
+		"difficulty": ai_difficulty,
+		"training": training_mode,
+	})
 	_set_locomotion(player_node, 0.0)
 	_set_locomotion(enemy_node, 0.0)
 	sprint_enabled = false
@@ -3177,7 +3953,168 @@ func _start_match() -> void:
 		sprint_button.text = "RUN  ·  SHIFT"
 	if is_instance_valid(challenge_layer):
 		_clear_challenge_overlay()
+	# Begin Round 1 via MatchDirector
+	round_active = false
+	match_winner = 0
+	match_director.start_next_round()
 	_update_hud()
+
+func _on_round_started(round_number: int, round_seconds: int) -> void:
+	current_round = round_number
+	round_active = true
+	round_timeout_pending = false
+	match_over = false
+	Engine.time_scale = 1.0
+	player_hp = MAX_HP
+	enemy_hp = MAX_HP
+	player_mp = 3.0
+	enemy_mp = 3.0
+	player_stun = MAX_STUN
+	enemy_stun = MAX_STUN
+	player_stun_lock = 0.0
+	enemy_stun_lock = 0.0
+	player_guard = 0.0
+	player_is_blocking = false
+	enemy_guard = 0.0
+	player_guard_damage = 0.0
+	enemy_guard_damage = 0.0
+	if tag_partner_active:
+		tag_partner_hp = MAX_HP
+		tag_partner_mp = 3.0
+		tag_partner_stun = MAX_STUN
+		tag_cooldown = 0.0
+		tag_swap_lock = 0.0
+		if is_instance_valid(tag_partner_node):
+			tag_partner_node.visible = false
+	player_guard_crushed = false
+	enemy_guard_crushed = false
+	player_combo = 0
+	enemy_combo = 0
+	_clear_grapple()
+	flight_enabled = false
+	crouch_enabled = false
+	if is_instance_valid(flight_button):
+		flight_button.set_pressed_no_signal(false)
+	if is_instance_valid(crouch_button):
+		crouch_button.set_pressed_no_signal(false)
+	player_is_dashing = false
+	player_dash_timer = 0.0
+	player_dash_cooldown = 0.0
+	enemy_is_dashing = false
+	enemy_dash_timer = 0.0
+	enemy_dash_cooldown = 0.0
+	_combo_counter_hud_reset()
+	_show_feedback("ROUND %d · FIGHT!" % current_round)
+	_play_sfx("round_start", -6.0, 0.1)
+	if is_instance_valid(player_node):
+		_play_fighter_action(player_node, "idle", 0.2)
+	if is_instance_valid(enemy_node):
+		_play_fighter_action(enemy_node, "idle", 0.2)
+	round_timer.start_round(round_seconds)
+	_update_hud()
+
+func _on_round_finished(round_number: int, winner: int) -> void:
+	round_active = false
+	round_timer.pause_round()
+	var round_winner_text := "PLAYER" if winner > 0 else "OPPONENT"
+	_show_feedback("ROUND %d · %s WINS" % [round_number, round_winner_text.to_upper()])
+	GameplayLog.record("round_end", {"round": round_number, "winner": "player" if winner > 0 else "opponent"})
+	_update_hud()
+
+func _on_match_finished(winner: int) -> void:
+	match_winner = winner
+	match_over = true
+	round_timer.pause_round()
+	Engine.time_scale = 1.0
+	_clear_grapple()
+	_play_fighter_action(enemy_node if winner > 0 else player_node, "knockout", 100000.0)
+	_play_fighter_action(player_node if winner > 0 else enemy_node, "victory", 100000.0)
+	if winner > 0 and not training_mode:
+		wins += 1
+		rank_index = min(GameData.RANKS.size() - 1, rank_index + 1)
+		player_xp += 25
+		while player_xp >= player_level * 100 and player_level < 50:
+			player_xp -= player_level * 100
+			player_level += 1
+		unlocked_ultimates = clampi(1 + int((player_level - 1) / 5), 1, 6)
+		if story_mode_active:
+			story_progress = max(story_progress, story_stage_index + 1)
+		_save_progress()
+		_apply_elo_change(true)
+	elif not training_mode:
+		_apply_elo_change(false)
+	_coach_generate_hint()
+	_show_result(winner > 0)
+
+func _on_round_time_changed(seconds_remaining: int, frames_remaining: int) -> void:
+	if not round_active:
+		return
+	if seconds_remaining <= 0 and not round_timeout_pending:
+		round_timeout_pending = true
+		_handle_round_timeout()
+	if is_instance_valid(hud):
+		var timer_label := hud.get_node_or_null("RoundInfo/RoundTimer") as Label
+		if timer_label:
+			timer_label.text = "TIME %d" % seconds_remaining
+	var round_label := hud.get_node_or_null("RoundInfo/RoundLabel") as Label
+	if round_label:
+		round_label.text = "ROUND %d/%d" % [current_round, rounds_to_win * 2 - 1]
+
+func _on_round_timed_out() -> void:
+	_handle_round_timeout()
+
+func _handle_round_timeout() -> void:
+	if not round_active or round_timeout_pending and match_over:
+		return
+	round_active = false
+	round_timer.pause_round()
+	# Timeout: whoever has more HP wins the round
+	var winner := 0
+	if player_hp > enemy_hp:
+		winner = 1
+	elif enemy_hp > player_hp:
+		winner = -1
+	_show_feedback("TIMEOUT · %s WINS ROUND" % ("PLAYER" if winner > 0 else "OPPONENT" if winner < 0 else "DRAW"))
+	GameplayLog.record("round_timeout", {"winner": "player" if winner > 0 else "opponent" if winner < 0 else "draw", "player_hp": roundi(player_hp), "enemy_hp": roundi(enemy_hp)})
+	if winner != 0:
+		match_director.finish_round(winner)
+	else:
+		# Draw - no one gets the round
+		_show_result(false)
+
+func _handle_ko(winner: int) -> void:
+	if not round_active:
+		return
+	round_active = false
+	round_timer.pause_round()
+	_show_feedback("K.O. · %s WINS ROUND" % ("PLAYER" if winner > 0 else "OPPONENT"))
+	GameplayLog.record("round_ko", {"winner": "player" if winner > 0 else "opponent"})
+	match_director.finish_round(winner)
+
+func _combo_counter_hud_reset() -> void:
+	if is_instance_valid(combo_counter_hud):
+		combo_counter_hud.reset_combo()
+
+func _coach_generate_hint() -> void:
+	var advice := ""
+	var player_ratio := clampf(player_hp / MAX_HP, 0.0, 1.0)
+	var enemy_ratio := clampf(enemy_hp / MAX_HP, 0.0, 1.0)
+	if player_guard_crushed:
+		advice = "Your guard was crushed — mix in dodge and parry instead of holding block."
+	elif enemy_guard_damage > GUARD_MAX * 0.6:
+		advice = "Enemy guard is near breaking — keep pressure with guard-breaking moves."
+	elif player_combo >= 3:
+		advice = "Nice combo! Keep the pressure going to build MP faster."
+	elif player_ratio < 0.3:
+		advice = "Low on HP — consider retreating to charge MP and recover stun."
+	elif enemy_ratio < 0.3:
+		advice = "Enemy is low on HP — go for the finish with an ultimate."
+	else:
+		advice = "Watch your spacing and punish whiffed attacks."
+	coach_hint_text = advice
+	coach_hint_timer = 6.0
+	coach_last_advice_frame = replay_frame
+	_show_feedback("COACH: %s" % advice)
 
 func _update_player_movement(delta: float) -> void:
 	if not is_instance_valid(player_node) or stun_lock > 0.0 or challenge_active:
@@ -3201,13 +4138,26 @@ func _update_player_movement(delta: float) -> void:
 	if player_dash_cooldown > 0.0:
 		player_dash_cooldown -= delta
 	if player_is_dashing:
+		# ── Dash-cancel: press attack during dash to cancel into the move ──
+		if Input.is_action_just_pressed("attack_punch") or Input.is_action_just_pressed("attack_kick") or Input.is_action_just_pressed("attack_uppercut") or Input.is_action_just_pressed("attack_grab"):
+			_end_dash()
+			player_dash_cancel_queued = true
 		player_dash_timer -= delta
-		if player_dash_timer <= 0.0:
+		var dash_remaining := float(player_node.get_meta("dash_remaining", 0.0))
+		if player_dash_timer <= 0.0 or dash_remaining <= 0.001:
 			_end_dash()
 		else:
-			var dash_move := player_dash_direction * (AIR_DASH_SPEED if bool(player_node.get_meta("airborne", false)) else DASH_SPEED) * delta
+			var dash_speed := AIR_DASH_SPEED if bool(player_node.get_meta("airborne", false)) else DASH_SPEED
+			var dash_step := minf(dash_speed * delta, dash_remaining)
+			var dash_move := player_dash_direction * dash_step
 			_move_fighter(player_node, enemy_node, dash_move)
+			player_node.set_meta("dash_remaining", maxf(0.0, dash_remaining - dash_step))
 			_set_locomotion(player_node, 1.0)
+			# ── Fluid trail segments during dash ──
+			trail_segment_timer = maxf(0.0, trail_segment_timer - delta)
+			if trail_segment_timer <= 0.0:
+				_spawn_trail_segment(player_node, GameData.CHARACTERS[player_character_index].accent if is_instance_valid(player_node) else Color("#ffd45c"))
+				trail_segment_timer = 0.04
 			return
 	if Input.is_action_just_pressed("action_dash") or (joystick_vector.length() > 0.9 and Input.is_action_just_pressed("action_dash")):
 		var dash_dir := Vector3(joystick_vector.x, 0.0, joystick_vector.y)
@@ -3233,7 +4183,91 @@ func _update_player_movement(delta: float) -> void:
 		player_ground_velocity = Vector3.ZERO
 		_update_flight_movement(input_vector, delta)
 		return
+	# ── Melee movement tech ──
+	var is_airborne := bool(player_node.get_meta("airborne", false))
+	# Wavedash: dash + down input on ground = low fast ground slide
+	if Input.is_action_just_pressed("action_dash") and input_vector.y > 0.5 and not is_airborne and not player_is_dashing and player_dash_cooldown <= 0.0:
+		player_is_wavedashing = true
+		player_wavedash_timer = WAVEDASH_DURATION
+		player_wavedash_direction = -player_node.global_basis.z
+		player_node.set_meta("dash_remaining", 2.2)
+		_play_fighter_action(player_node, "dash", 0.15)
+		_show_feedback("WAVEDASH")
+	# Wavedash movement
+	if player_is_wavedashing:
+		player_wavedash_timer = maxf(0.0, player_wavedash_timer - delta)
+		var dash_remaining := float(player_node.get_meta("dash_remaining", 0.0))
+		if player_wavedash_timer <= 0.0 or dash_remaining <= 0.001:
+			player_is_wavedashing = false
+			_end_dash()
+		else:
+			var dash_step := minf(WAVEDASH_SPEED * delta, dash_remaining)
+			var dash_move := player_wavedash_direction * dash_step
+			_move_fighter(player_node, enemy_node, dash_move)
+			player_node.set_meta("dash_remaining", maxf(0.0, dash_remaining - dash_step))
+			_set_locomotion(player_node, 1.0)
+			trail_segment_timer = maxf(0.0, trail_segment_timer - delta)
+			if trail_segment_timer <= 0.0:
+				_spawn_trail_segment(player_node, GameData.CHARACTERS[player_character_index].accent if is_instance_valid(player_node) else Color("#ffd45c"))
+				trail_segment_timer = 0.04
+			return
+	# Air drift: directional control while airborne
+	if is_airborne and not flight_enabled and not player_is_dashing:
+		player_air_drift_timer = maxf(0.0, player_air_drift_timer - delta)
+		var drift_input := Vector3(input_vector.x, 0.0, input_vector.y)
+		if drift_input.length_squared() > 0.01:
+			player_air_drift_direction = drift_input.normalized()
+			player_air_drift_timer = 0.15
+		if player_air_drift_timer > 0.0:
+			var drift_step := minf(AIR_DRIFT_SPEED * delta, 0.5)
+			_move_fighter(player_node, enemy_node, player_air_drift_direction * drift_step)
+			_set_locomotion(player_node, 0.6)
+	# Fast-fall: hold down while airborne to increase gravity
+	if is_airborne and Input.is_action_pressed("move_back"):
+		player_fast_fall = true
+	else:
+		player_fast_fall = false
 	var input_strength := clampf(input_vector.length(), 0.0, 1.0)
+	# ── Parkour: wall-run / wall-jump ──
+	var wall_hit := _wall_detection(player_node, input_vector)
+	if wall_hit.hit and input_strength >= 0.5 and not bool(player_node.get_meta("airborne", false)) and not player_is_dashing:
+		var wall_normal: Vector3 = wall_hit.normal
+		var move_dir := Vector3(input_vector.x, 0.0, input_vector.y).normalized()
+		# Moving into the wall enables wall-run
+		if move_dir.dot(wall_normal) > 0.3:
+			player_is_wall_running = true
+			player_wall_normal = wall_normal
+			player_wall_run_timer = WALL_RUN_DURATION
+			# Slide up the wall while holding jump
+			if Input.is_action_just_pressed("action_jump"):
+				player_wall_jump_queued = true
+			if player_wall_jump_queued and Input.is_action_pressed("action_jump"):
+				# Wall jump: launch away from wall and upward
+				var jump_dir: Vector3 = (-wall_normal * 0.6 + Vector3.UP * 0.8).normalized()
+				_move_fighter(player_node, enemy_node, jump_dir * WALL_JUMP_FORCE)
+				player_node.set_meta("airborne", true)
+				player_node.set_meta("air_elapsed", 0.0)
+				player_node.set_meta("air_gravity", AIR_GRAVITY)
+				player_node.set_meta("launch_velocity", sqrt(2.0 * AIR_GRAVITY * JUMP_HEIGHT * 1.2))
+				player_node.set_meta("air_duration", JUMP_DURATION * 1.3)
+				_play_fighter_action(player_node, "jump", JUMP_DURATION)
+				_show_feedback("WALL JUMP")
+				player_is_wall_running = false
+				player_wall_jump_queued = false
+				return
+			# Wall run: move along wall
+			var slide_dir: Vector3 = wall_normal.cross(Vector3.UP).normalized()
+			var slide_speed: float = WALL_RUN_SPEED * delta * input_strength
+			_move_fighter(player_node, enemy_node, slide_dir * slide_speed)
+			player_node.position.y = move_toward(player_node.position.y, player_node.position.y + 1.0 * delta, delta * 2.0)
+			_set_locomotion(player_node, 0.8)
+			if not Input.is_action_pressed("action_jump"):
+				player_is_wall_running = false
+				player_wall_jump_queued = false
+			return
+	else:
+		player_is_wall_running = false
+		player_wall_jump_queued = false
 	var is_running := sprint_enabled or Input.is_action_pressed("action_sprint") or (keyboard.length() <= 0.1 and input_strength >= 0.9)
 	var move_speed := PLAYER_SPEED if is_running else WALK_SPEED
 	if crouch_enabled:
@@ -3241,11 +4275,73 @@ func _update_player_movement(delta: float) -> void:
 	var desired_velocity := Vector3.ZERO
 	if input_strength >= 0.05:
 		desired_velocity = Vector3(input_vector.x, 0.0, input_vector.y).normalized() * move_speed * (1.0 if keyboard.length() > 0.1 else input_strength)
+	# ── Strafe boost: moving perpendicular to facing direction gains speed ──
+	var fighter_forward := -player_node.global_basis.z
+	fighter_forward.y = 0.0
+	if fighter_forward.length_squared() > 0.001:
+		fighter_forward = fighter_forward.normalized()
+	var strafe_dot: float = 0.0
+	if desired_velocity.length_squared() > 0.01:
+		strafe_dot = abs(desired_velocity.normalized().dot(fighter_forward))
+	if desired_velocity.length_squared() > 0.01 and strafe_dot < 0.5:
+		player_strafe_boost_timer = 0.15
+		desired_velocity *= STRAFE_BOOST
+	if player_strafe_boost_timer > 0.0:
+		player_strafe_boost_timer = maxf(0.0, player_strafe_boost_timer - delta)
 	# Snappy accel / sharper braking so walks don't feel floaty after hit-stop.
 	var acceleration := 70.0 if desired_velocity.length_squared() < player_ground_velocity.length_squared() else 52.0
 	player_ground_velocity = player_ground_velocity.move_toward(desired_velocity, acceleration * delta)
 	_move_fighter(player_node, enemy_node, player_ground_velocity * delta)
 	_set_locomotion(player_node, player_ground_velocity.length() / PLAYER_SPEED)
+
+func _wall_detection(fighter: Node3D, input_vector: Vector2) -> Dictionary:
+	# Simple distance-based wall check against arena bounds
+	var pos := fighter.global_position
+	var move_dir := Vector3(input_vector.x, 0.0, input_vector.y).normalized()
+	if move_dir.length_squared() < 0.01:
+		move_dir = fighter.global_basis.z
+	var hit := false
+	var normal := Vector3.ZERO
+	var point := Vector3.ZERO
+	if abs(pos.x) >= ARENA_LIMIT - WALL_DETECT_DIST and move_dir.x * pos.x > 0:
+		hit = true
+		normal = Vector3(-sign(pos.x), 0.0, 0.0)
+		point = Vector3(ARENA_LIMIT * sign(pos.x), pos.y, pos.z)
+	elif abs(pos.z) >= ARENA_LIMIT - WALL_DETECT_DIST and move_dir.z * pos.z > 0:
+		hit = true
+		normal = Vector3(0.0, 0.0, -sign(pos.z))
+		point = Vector3(pos.x, pos.y, ARENA_LIMIT * sign(pos.z))
+	return {"hit": hit, "normal": normal, "position": point, "collider": null}
+
+func _spawn_trail_segment(fighter: Node3D, color: Color) -> void:
+	if not is_instance_valid(fighter) or not is_instance_valid(arena_root):
+		return
+	# ── Fluid-style trail: multiple overlapping liquid segments ──
+	var trail_count := 3 if art_style == ArtStyle.PIXEL else 2
+	for i in range(trail_count):
+		var segment := MeshInstance3D.new()
+		var cylinder := _fx_cylinder()
+		cylinder.top_radius = 0.16 - float(i) * 0.04
+		cylinder.bottom_radius = 0.04
+		cylinder.height = 0.3
+		segment.mesh = cylinder
+		var offset := Vector3(0.0, 0.2 + float(i) * 0.1, 0.0)
+		segment.global_position = fighter.global_position + offset
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.albedo_color = color
+		mat.emission_enabled = true
+		mat.emission = color
+		mat.emission_energy_multiplier = 2.2
+		mat.alpha_scissor_threshold = 0.1 if art_style == ArtStyle.PIXEL else 0.0
+		segment.material_override = mat
+		arena_root.add_child(segment)
+		# Fluid fade with slight scale shrink
+		var tween := create_tween()
+		tween.tween_property(segment, "scale", Vector3(0.5, 0.5, 0.5), 0.25)
+		tween.tween_property(segment, "modulate:a", 0.0, 0.3)
+		tween.tween_callback(segment.queue_free)
 
 func _update_flight_movement(input_vector: Vector2, delta: float, play_animation := true) -> void:
 	var vertical := Input.get_axis("action_fly_down", "action_fly_up")
@@ -3296,6 +4392,7 @@ func _on_crouch_toggled(enabled: bool) -> void:
 	_set_locomotion(player_node, 0.0)
 
 func _on_flight_toggled(enabled: bool) -> void:
+	GameplayLog.record("flight_toggle", {"enabled": enabled})
 	flight_enabled = enabled
 	if not enabled:
 		touch_flight_up = false
@@ -3343,10 +4440,14 @@ func _perform_dash(direction: Vector3) -> void:
 func _end_dash() -> void:
 	player_is_dashing = false
 	player_dash_timer = 0.0
+	if is_instance_valid(player_node):
+		player_node.set_meta("dash_remaining", 0.0)
 
 func _end_enemy_dash() -> void:
 	enemy_is_dashing = false
 	enemy_dash_timer = 0.0
+	if is_instance_valid(enemy_node):
+		enemy_node.set_meta("dash_remaining", 0.0)
 
 ## Frame-step dash used by both fighters. Avoids tweening position (which double-moved
 ## with the per-frame dash integrator and skipped clearance).
@@ -3373,21 +4474,37 @@ func _perform_fighter_dash(fighter: Node3D, direction: Vector3, force_air: bool 
 	var is_air := force_air or bool(fighter.get_meta("airborne", false)) or bool(fighter.get_meta("flying", false))
 	var dash_speed := AIR_DASH_SPEED if is_air else DASH_SPEED
 	var start_pos := fighter.global_position
-	var end_pos := start_pos + dash_dir * (dash_speed * DASH_DURATION)
+	var other := enemy_node if is_player else player_node
+	var dash_distance := dash_speed * DASH_DURATION
+	if is_instance_valid(other):
+		var toward_target := other.global_position - start_pos
+		toward_target.y = 0.0
+		if toward_target.length_squared() > 0.001:
+			var alignment := dash_dir.dot(toward_target.normalized())
+			if alignment > 0.05:
+				var safe_travel := maxf(0.0, (toward_target.length() - DASH_ATTACK_CLEARANCE) / alignment)
+				dash_distance = minf(dash_distance, safe_travel)
+	if dash_distance <= 0.04:
+		if is_player:
+			_show_feedback("DASH · ALREADY IN STRIKING RANGE")
+		return
+	var end_pos := start_pos + dash_dir * dash_distance
+	GameplayLog.record("dash", {"actor": "player" if is_player else "opponent", "distance": snappedf(dash_distance, 0.01), "air": is_air})
 	end_pos.x = clampf(end_pos.x, -ARENA_LIMIT, ARENA_LIMIT)
 	end_pos.z = clampf(end_pos.z, -ARENA_LIMIT, ARENA_LIMIT)
 	end_pos.y = clampf(end_pos.y, 0.0, 6.0) if is_air else start_pos.y
 	var accent: Color = GameData.CHARACTERS[player_character_index if is_player else opponent_character_index].accent
+	fighter.set_meta("dash_remaining", dash_distance)
 	_spawn_speed_lines(start_pos, end_pos, accent)
 	_play_fighter_action(fighter, "dash", DASH_DURATION)
 	if is_player:
 		player_is_dashing = true
-		player_dash_timer = DASH_DURATION
+		player_dash_timer = minf(DASH_DURATION, dash_distance / dash_speed)
 		player_dash_cooldown = DASH_COOLDOWN
 		player_dash_direction = dash_dir
 	else:
 		enemy_is_dashing = true
-		enemy_dash_timer = DASH_DURATION
+		enemy_dash_timer = minf(DASH_DURATION, dash_distance / dash_speed)
 		enemy_dash_cooldown = DASH_COOLDOWN
 		enemy_dash_direction = dash_dir
 
@@ -3643,15 +4760,22 @@ func _update_ai(delta: float) -> void:
 	if bool(enemy_node.get_meta("test_dummy", false)) or enemy_is_training:
 		_set_locomotion(enemy_node, 0.0)
 		return
+	if ai_opening_delay > 0.0:
+		ai_opening_delay = maxf(0.0, ai_opening_delay - delta)
+		_set_locomotion(enemy_node, 0.0)
+		return
 	if enemy_dash_cooldown > 0.0:
 		enemy_dash_cooldown = maxf(0.0, enemy_dash_cooldown - delta)
 	if enemy_is_dashing:
 		enemy_dash_timer -= delta
-		if enemy_dash_timer <= 0.0:
+		var dash_remaining := float(enemy_node.get_meta("dash_remaining", 0.0))
+		if enemy_dash_timer <= 0.0 or dash_remaining <= 0.001:
 			_end_enemy_dash()
 		else:
 			var dash_speed := AIR_DASH_SPEED if bool(enemy_node.get_meta("airborne", false)) or bool(enemy_node.get_meta("flying", false)) else DASH_SPEED
-			_move_fighter(enemy_node, player_node, enemy_dash_direction * dash_speed * delta)
+			var dash_step := minf(dash_speed * delta, dash_remaining)
+			_move_fighter(enemy_node, player_node, enemy_dash_direction * dash_step)
+			enemy_node.set_meta("dash_remaining", maxf(0.0, dash_remaining - dash_step))
 			_set_locomotion(enemy_node, 1.0)
 		return
 	if enemy_stun_lock > 0.0:
@@ -3710,8 +4834,10 @@ func _update_ai(delta: float) -> void:
 	# Update state machine timer
 	if ai_state_timer > 0.0:
 		ai_state_timer -= delta
-		if ai_state_timer <= 0.0:
-			ai_state = AIState.IDLE
+		if ai_state_timer > 0.0:
+			_set_locomotion(enemy_node, 0.0)
+			return
+		ai_state = AIState.IDLE
 
 	# Utility AI decision loop - recalculates every reaction_cooldown
 	ai_decision_timer -= delta
@@ -3726,9 +4852,9 @@ func _ai_utility_score(action: String, dist: float, profile: Dictionary, player_
 
 	match action:
 		"FLASH_STEP":
-			# High utility if distance > 4m and AI health is high
-			if not low_health and dist > 4.0:
-				score = clamp((dist - 3.0) / 10.0, 0.0, 1.0)
+			# Reserve closing dashes for long range; ordinary starting spacing is neutral.
+			if not low_health and dist > 5.2:
+				score = clampf((dist - 4.6) / 10.0, 0.0, 1.0)
 		"PUNISH":
 			# High utility if close and player recovering from whiff
 			if dist <= 2.5 and player_recovering:
@@ -3755,6 +4881,10 @@ func _ai_utility_score(action: String, dist: float, profile: Dictionary, player_
 			# Standard close-range attack
 			if dist <= 2.2 and not player_attacking and not player_blocking:
 				score = 0.6
+		"CHASE":
+			# Walk into a readable striking range instead of using a long dash at neutral.
+			if dist > 2.25 and dist <= 5.2:
+				score = 0.28
 		"CHARGE":
 			# Charge meter when far and low meter
 			if enemy_mp < 1.5 and dist > 1.65:
@@ -3830,9 +4960,65 @@ func _ai_execute_action(action: String, dist: float, profile: Dictionary) -> voi
 			_apply_move(false, {"name": "Focus", "kind": "charge", "charge": 1.5, "cost": 0, "cue": "FOCUS"}, dist)
 			ai_state = AIState.IDLE
 			ai_state_timer = 0.8
+		"CHASE":
+			var toward_player := player_node.global_position - enemy_node.global_position
+			toward_player.y = 0.0
+			if toward_player.length_squared() > 0.001:
+				var approach := toward_player.normalized() * minf(maxf(0.0, dist - 1.9), 0.55)
+				_move_fighter(enemy_node, player_node, approach)
+				_set_locomotion(enemy_node, 0.65)
+			ai_state = AIState.DASH
+			ai_state_timer = 0.2
 		"IDLE":
 			ai_state = AIState.IDLE
 			ai_state_timer = 0.3
+
+func _update_player2(delta: float) -> void:
+	if not is_instance_valid(enemy_node) or not is_instance_valid(player_node):
+		return
+	if enemy_stun_lock > 0.0:
+		return
+	var move_speed := PLAYER_SPEED
+	var dir := Vector3(player2_joystick_vector.x, 0.0, player2_joystick_vector.y)
+	if dir.length_squared() > 0.01:
+		var step := minf(move_speed * delta, dir.length() * move_speed * delta)
+		_move_fighter(enemy_node, player_node, dir.normalized() * step)
+		_set_locomotion(enemy_node, 1.0)
+	else:
+		_set_locomotion(enemy_node, 0.0)
+
+func _on_enemy_attack(attack_type: String) -> void:
+	if not is_instance_valid(enemy_node) or enemy_stun_lock > 0.0:
+		return
+	var move := {"name": attack_type.to_upper(), "kind": "attack", "damage": 10, "stun": 10, "attack_type": attack_type, "animation": attack_type}
+	_apply_move(false, move, enemy_node.global_position.distance_to(player_node.global_position))
+
+func _on_enemy_jump() -> void:
+	if not is_instance_valid(enemy_node) or bool(enemy_node.get_meta("airborne", false)):
+		return
+	enemy_node.set_meta("airborne", true)
+	enemy_node.set_meta("air_elapsed", 0.0)
+	var jump_velocity := sqrt(2.0 * AIR_GRAVITY * JUMP_HEIGHT)
+	enemy_node.set_meta("air_gravity", AIR_GRAVITY)
+	enemy_node.set_meta("launch_velocity", jump_velocity)
+	enemy_node.set_meta("air_duration", jump_velocity / AIR_GRAVITY * 2.0)
+	_play_fighter_action(enemy_node, "jump", JUMP_DURATION)
+
+func _on_enemy_block() -> void:
+	if not is_instance_valid(enemy_node):
+		return
+	enemy_guard = 12.0
+	_play_fighter_action(enemy_node, "block", 0.5)
+
+func _perform_enemy_dash(direction: Vector3) -> void:
+	if not is_instance_valid(enemy_node) or enemy_is_dashing:
+		return
+	enemy_is_dashing = true
+	enemy_dash_timer = DASH_DURATION
+	enemy_dash_cooldown = DASH_COOLDOWN
+	enemy_dash_direction = direction.normalized()
+	enemy_node.set_meta("dash_remaining", 2.5)
+	_play_fighter_action(enemy_node, "dash", 0.2)
 
 # 🎯 UTILITY AI DECISION - picks highest-scoring action every decision_interval
 func _ai_make_decision() -> void:
@@ -3850,7 +5036,7 @@ func _ai_make_decision() -> void:
 	var best_action := "IDLE"
 	var max_score := 0.05
 
-	var actions := ["FLASH_STEP", "PUNISH", "AIR_LAUNCHER", "PERFECT_BLOCK", "RETREAT", "ULTIMATE", "GROUND_COMBO", "CHARGE"]
+	var actions := ["FLASH_STEP", "PUNISH", "AIR_LAUNCHER", "PERFECT_BLOCK", "RETREAT", "ULTIMATE", "GROUND_COMBO", "CHASE", "CHARGE"]
 	for action in actions:
 		var score := _ai_utility_score(action, dist, profile, player_airborne, player_attacking, player_recovering, player_blocking, low_health)
 		# Difficulty modifier
@@ -3863,16 +5049,23 @@ func _ai_make_decision() -> void:
 			max_score = score
 			best_action = action
 
+	if best_action != "IDLE":
+		GameplayLog.record("ai_decision", {"action": best_action, "distance": snappedf(dist, 0.01), "player_hp": roundi(player_hp), "opponent_hp": roundi(enemy_hp)})
 	_ai_execute_action(best_action, dist, profile)
 
 func _ai_profile() -> Dictionary:
+	var profile: Dictionary
 	match ai_difficulty:
 		"Easy":
-			return {"decision_interval": 0.4, "chase_speed": 0.55, "reaction_time": 0.4, "block_duration": 0.5, "medium_chance": 0.08, "grab_chance": 0.03, "dodge_chance": 0.12, "defense_dodge_rate": 0.22, "ultimate_chance": 0.0, "block_threshold": 0.35, "antiair_chance": 0.05, "whiff_punish_chance": 0.1, "okizeme_chance": 0.05}
+			profile = {"decision_interval": 0.4, "chase_speed": 0.55, "reaction_time": 0.4, "block_duration": 0.5, "medium_chance": 0.08, "grab_chance": 0.03, "dodge_chance": 0.12, "defense_dodge_rate": 0.22, "ultimate_chance": 0.0, "block_threshold": 0.35, "antiair_chance": 0.05, "whiff_punish_chance": 0.1, "okizeme_chance": 0.05, "damage_scale": 0.78, "stun_scale": 0.68}
 		"Hard":
-			return {"decision_interval": 0.08, "chase_speed": 1.1, "reaction_time": 0.08, "block_duration": 0.7, "medium_chance": 0.65, "grab_chance": 0.25, "dodge_chance": 0.35, "defense_dodge_rate": 0.48, "ultimate_chance": 0.18, "block_threshold": 0.2, "antiair_chance": 0.4, "whiff_punish_chance": 0.6, "okizeme_chance": 0.5}
+			profile = {"decision_interval": 0.18, "chase_speed": 0.85, "reaction_time": 0.18, "block_duration": 0.55, "medium_chance": 0.48, "grab_chance": 0.16, "dodge_chance": 0.28, "defense_dodge_rate": 0.36, "ultimate_chance": 0.12, "block_threshold": 0.24, "antiair_chance": 0.3, "whiff_punish_chance": 0.42, "okizeme_chance": 0.35, "damage_scale": 1.0, "stun_scale": 0.9}
 		_:
-			return {"decision_interval": 0.2, "chase_speed": 0.85, "reaction_time": 0.2, "block_duration": 0.6, "medium_chance": 0.4, "grab_chance": 0.12, "dodge_chance": 0.22, "defense_dodge_rate": 0.34, "ultimate_chance": 0.08, "block_threshold": 0.3, "antiair_chance": 0.2, "whiff_punish_chance": 0.3, "okizeme_chance": 0.2}
+			profile = {"decision_interval": 0.32, "chase_speed": 0.72, "reaction_time": 0.32, "block_duration": 0.5, "medium_chance": 0.28, "grab_chance": 0.08, "dodge_chance": 0.16, "defense_dodge_rate": 0.26, "ultimate_chance": 0.05, "block_threshold": 0.34, "antiair_chance": 0.12, "whiff_punish_chance": 0.2, "okizeme_chance": 0.12, "damage_scale": 0.9, "stun_scale": 0.8}
+	if is_instance_valid(match_director):
+		profile["reaction_time"] = match_director.ai_reaction_time(
+			float(profile["reaction_time"]), player_hp, MAX_HP, enemy_hp, MAX_HP)
+	return profile
 
 func _ai_select_punish_move(distance: float) -> Dictionary:
 	var options := GameData.legends_arts(opponent_data.get("signature", ""), unlocked_ultimates, opponent_style)
@@ -3895,6 +5088,7 @@ func _ai_select_punish_move(distance: float) -> Dictionary:
 
 
 func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
+	GameplayLog.record("move_attempt", {"actor": "player" if is_player else "opponent", "move": str(move.get("name", "Unnamed")), "kind": str(move.get("kind", "attack")), "distance": snappedf(distance, 0.01)})
 	if is_player and (match_over or challenge_active):
 		return
 	if (is_player and player_stun_lock > 0.0) or (not is_player and enemy_stun_lock > 0.0):
@@ -3930,6 +5124,7 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 		else:
 			# Always keep the newest buffered input so late button presses win the window.
 			source.set_meta("pending_attack_move", move.duplicate(true))
+			_show_feedback("BUFFERED · %s" % str(move.get("name", "MOVE")).to_upper())
 			return
 	if is_player and kind == "attack":
 		var basic_type := str(move.get("attack_type", ""))
@@ -3962,6 +5157,7 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 	if kind in ["attack", "trap", "ultimate"] and not _has_attack_contact(source, target, move, attack_range):
 		_play_fighter_action(source, _attack_animation(move), 0.38)
 		_show_feedback("WHIFF · GET CLOSER AND FACE YOUR OPPONENT")
+		_show_move_cue(source, "WHIFF", Color("#ff7777"))
 		return
 
 	if is_player:
@@ -4041,6 +5237,8 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 			attack_damage += 8.0
 		if character_index == 9 and str(move.get("tier", "")).to_lower() == "medium":
 			attack_damage += 4.0
+		if not is_player:
+			attack_damage *= float(_ai_profile().get("damage_scale", 0.9))
 		if bool(move.get("aerial", false)):
 			attack_damage += 4.0
 		if kind == "ultimate":
@@ -4062,6 +5260,8 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 			attack_damage *= NORMAL_DAMAGE_SCALE
 		if powerup_active:
 			attack_damage *= 1.25
+		if str(move.get("name", "")) == str(character.get("signature", "")):
+			attack_damage *= float(character.get("signature_damage_multiplier", 1.0))
 		var guarded := enemy_guard if is_player else player_guard
 		target_was_guarding = guarded > 0.0
 		if bool(move.get("grab", false)):
@@ -4079,6 +5279,8 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 			stun_damage += 8.0
 		if not is_player and player_character_index == 7 and player_guard > 0.0:
 			stun_damage *= 0.6
+		if not is_player:
+			stun_damage *= float(_ai_profile().get("stun_scale", 0.8))
 		source.set_meta("attack_active", true)
 		player_recovery = 0.0 if is_player else player_recovery
 		enemy_recovery = 0.48 if not is_player else enemy_recovery
@@ -4086,6 +5288,7 @@ func _apply_move(is_player: bool, move: Dictionary, distance: float) -> void:
 		# Ultimate special attacks - cinematic, bypass normal animation
 		var ultimate_type := str(move.get("ultimate_type", ""))
 		if kind == "ultimate" and not ultimate_type.is_empty():
+			_apply_slow_mo(ULTIMATE_SLOW_MO_DURATION, ULTIMATE_SLOW_MO_SCALE)
 			source.set_meta("attack_state", {
 				"target": target,
 				"move": move.duplicate(true),
@@ -4127,15 +5330,16 @@ func _set_locomotion(fighter: Node3D, speed: float) -> void:
 		animation_name = "idle"
 	elif speed > 0.05:
 		animation_name = "walk"
+	var clip_name := _resolve_clip_name(fighter, animation_name)
 	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
 	if not is_instance_valid(animation_player):
 		return
 	var playback_speed := 1.0
 	if animation_name == "walk":
 		playback_speed = lerpf(0.85, 1.45, clampf(speed, 0.0, 1.0))
-	if animation_player.current_animation != animation_name:
+	if animation_player.current_animation != clip_name:
 		animation_player.speed_scale = playback_speed
-		animation_player.play(animation_name, 0.12)
+		animation_player.play(clip_name, 0.12)
 	else:
 		animation_player.speed_scale = playback_speed
 
@@ -4240,6 +5444,17 @@ func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 		return "idle"
 	var clip_name := ""
 	var is_player_fighter := fighter == player_node
+	if str(fighter.get_meta("character_archetype", "")) == "einstein":
+		if action == "idle":
+			return "Fighter/EinsteinIdle"
+		if action == "einstein_wave":
+			return "Fighter/EinsteinWave"
+		if action == "kick":
+			return "kick_round" if posmod(int(fighter.get_meta("attack_count", 1)), 2) == 0 else "kick_front"
+		if action == "aerial_kick":
+			return "kick_front"
+		if action == "back_kick":
+			return "kick_round"
 	match action:
 		"idle":
 			clip_name = "idle"
@@ -4248,32 +5463,32 @@ func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 			var punch_clips: Array[String] = ["jab", "cross", "hook", "uppercut"]
 			clip_name = punch_clips[posmod(attack_count - 1, punch_clips.size())]
 		"kick":
-			var kick_clips: Array[String] = ["kick_front", "kick_round", "sweep", "kick_flying"]
+			var kick_clips: Array[String] = ["Fighter/Kick", "Fighter/Kick_Left", "Fighter/Kick_Right", "Fighter/AerialKick"]
 			clip_name = kick_clips[posmod(int(fighter.get_meta("attack_count", 1)) - 1, kick_clips.size())]
 		"aerial_kick":
-			clip_name = "kick_flying"
+			clip_name = "Fighter/AerialKick"
 		"aerial_punch":
-			clip_name = "cross"
+			clip_name = "Fighter/Punch_Right"
 		"back_kick":
-			clip_name = "kick_round"
+			clip_name = "Fighter/Kick_Left"
 		"grab":
-			clip_name = "grab"
+			clip_name = "Fighter/Grab"
 		"grab_hold":
-			clip_name = "grab"
+			clip_name = "Fighter/GrabHold"
 		"grabbed":
-			clip_name = "hit_heavy"
+			clip_name = "Fighter/Grabbed"
 		"throw":
-			clip_name = "throw"
+			clip_name = "Fighter/Throw"
 		"block":
-			clip_name = "block"
+			clip_name = "Fighter/Block"
 		"block_hit":
-			clip_name = "block_hit"
+			clip_name = "Fighter/block_hit"
 		"charge":
-			clip_name = "charge"
+			clip_name = "Fighter/Charge"
 		"dodge":
-			clip_name = "dodge"
+			clip_name = "Fighter/Dodge"
 		"dash":
-			clip_name = "dodge"
+			clip_name = "Fighter/Dodge"
 		"jump":
 			clip_name = "jump"
 		"recovery":
@@ -4283,11 +5498,11 @@ func _resolve_clip_name(fighter: Node3D, action: String) -> String:
 		"flight_stop":
 			clip_name = "flight_stop"
 		"hit_react":
-			clip_name = "hit_light"
+			clip_name = "hit_react"
 		"victory":
 			clip_name = "victory"
 		"knockout":
-			clip_name = "ko"
+			clip_name = "Fighter/Knockout"
 		_:
 			clip_name = action.to_lower()
 	if not animation_player.has_animation(clip_name):
@@ -4321,6 +5536,8 @@ func _play_fighter_action(fighter: Node3D, action: String, duration: float) -> v
 	fighter.set_meta("anim_elapsed", 0.0)
 	fighter.set_meta("anim_duration", action_duration)
 	animation_player.speed_scale = clip.length / action_duration if action not in ["victory", "knockout", "flight"] else 1.0
+	if str(fighter.get_meta("character_archetype", "")) == "einstein" and action == "idle":
+		animation_player.speed_scale = 1.0
 	if action in ["grab_hold", "grabbed", "flight"]:
 		animation_player.speed_scale = 1.0
 	# Snappy attack blends; soft blends for locomotion / reactions so poses don't pop.
@@ -4361,8 +5578,12 @@ func _update_fighter_animations(delta: float) -> void:
 			var air_duration := float(fighter.get_meta("air_duration", JUMP_DURATION))
 			fighter.set_meta("air_elapsed", air_elapsed)
 			var gravity := float(fighter.get_meta("air_gravity", AIR_GRAVITY))
-			if fighter == player_node and Input.is_action_pressed("move_back"):
-				gravity *= 2.6
+			if fighter == player_node and player_fast_fall:
+				gravity *= FAST_FALL_MULTIPLIER
+			if fighter == enemy_node and player2_active:
+				var p2_input := player2_joystick_vector
+				if p2_input.y < -0.5:
+					gravity *= FAST_FALL_MULTIPLIER
 			var vertical_speed := float(fighter.get_meta("launch_velocity", 0.0)) - gravity * delta
 			var next_height: float = fighter.position.y + vertical_speed * delta
 			fighter.set_meta("launch_velocity", vertical_speed)
@@ -4423,6 +5644,11 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 	var action := "aerial_kick" if animation == "kick" and bool(move.get("aerial", false)) else ("aerial_punch" if animation == "punch" and bool(move.get("aerial", false)) else ("back_kick" if animation == "kick" and bool(move.get("back_kick", false)) else animation))
 	var attack_clip := _resolve_clip_name(source, action)
 	var frame_data := _attack_frame_data(animation, move, attack_clip)
+	if source == player_node:
+		training_last_move_name = str(move.get("name", action))
+		training_last_frame_data = frame_data.duplicate(true)
+		training_last_result = ""
+		training_last_advantage_frames = 0
 	var duration := float(frame_data.total_frames) / 60.0
 	_play_fighter_action(source, action, duration)
 	source.set_meta("attack_active", true)
@@ -4468,7 +5694,8 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		"impact_resolved": false,
 		"hit_type": hit_type,
 		"attack_limb": attack_limb,
-		"hitboxes_active": false
+		"hitboxes_active": false,
+		"elapsed": 0.0
 	})
 	if bool(move.get("projectile", false)):
 		var projectile_start := source.global_position + Vector3.UP * (1.05 if not bool(move.get("signature", false)) else 1.2) + direction * 0.42
@@ -4476,7 +5703,10 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		var orb := MeshInstance3D.new()
 		orb.name = "EnergyProjectile"
 		var sphere := _fx_sphere()
-		sphere.radius = 0.22 if not bool(move.get("signature", false)) else 0.42
+		var is_signature_projectile := bool(move.get("signature", false))
+		sphere.radial_segments = 20
+		sphere.rings = 10
+		sphere.radius = 0.22 if not is_signature_projectile else 0.28
 		sphere.height = sphere.radius * 2.0
 		orb.mesh = sphere
 		var projectile_color := accent
@@ -4494,17 +5724,17 @@ func _animate_attack(source: Node3D, target: Node3D, move: Dictionary, target_wa
 		orb.material_override = energy_material
 		var streak := MeshInstance3D.new()
 		var streak_mesh := _fx_cylinder()
-		streak_mesh.top_radius = 0.08 if not bool(move.get("signature", false)) else 0.12
-		streak_mesh.bottom_radius = 0.13 if not bool(move.get("signature", false)) else 0.22
-		streak_mesh.height = 0.65 if not bool(move.get("signature", false)) else 1.6
+		streak_mesh.top_radius = 0.08 if not is_signature_projectile else 0.08
+		streak_mesh.bottom_radius = 0.13 if not is_signature_projectile else 0.14
+		streak_mesh.height = 0.65 if not is_signature_projectile else 0.9
 		streak.mesh = streak_mesh
 		streak.material_override = energy_material
 		streak.rotation.x = PI / 2.0
 		orb.add_child(streak)
 		var orb_light := OmniLight3D.new()
 		orb_light.light_color = projectile_color
-		orb_light.light_energy = 2.0 if not bool(move.get("signature", false)) else 4.0
-		orb_light.omni_range = 2.2 if not bool(move.get("signature", false)) else 4.0
+		orb_light.light_energy = 2.0 if not is_signature_projectile else 3.0
+		orb_light.omni_range = 2.2 if not is_signature_projectile else 3.0
 		orb_light.shadow_enabled = false
 		orb.add_child(orb_light)
 		arena_root.add_child(orb)
@@ -4540,6 +5770,10 @@ func _attack_frame_data(animation: String, move: Dictionary, clip: String = "") 
 			startup_frames = 8
 			active_frames = 52
 			recovery_frames = 12
+		"einstein_wave":
+			startup_frames = 14
+			active_frames = 4
+			recovery_frames = 23
 		"kick":
 			startup_frames = 7
 			active_frames = 3
@@ -4563,7 +5797,7 @@ func _attack_frame_data(animation: String, move: Dictionary, clip: String = "") 
 		"active_frames": active_frames,
 		"recovery_frames": recovery_frames,
 		"total_frames": total_frames,
-		"fire_frame": ClipFrameData.fire_frame(clip, total_frames) if bool(move.get("projectile", false)) else 0.0
+		"fire_frame": 14.0 if animation == "einstein_wave" else (ClipFrameData.fire_frame(clip, total_frames) if bool(move.get("projectile", false)) else 0.0)
 	}
 
 func _mark_attack_lunge_complete(source: Variant, generation: int) -> void:
@@ -4584,7 +5818,8 @@ func _on_energy_projectile_arrived(orb: Variant, source: Variant, target: Varian
 	if state.is_empty():
 		return
 	var target_combat: Object = target.get_meta("fighter_combat", null)
-	var evaded: bool = target.global_position.distance_to(aimed_position) > 1.15
+	var target_offset: Vector3 = target.global_position - aimed_position
+	var evaded: bool = Vector2(target_offset.x, target_offset.z).length() > 1.15
 	if target_combat != null:
 		evaded = evaded or bool(target_combat.invincible)
 	if evaded:
@@ -4602,13 +5837,18 @@ func _on_energy_projectile_arrived(orb: Variant, source: Variant, target: Varian
 		_spawn_shell_casing(orb.global_position, -orb.global_basis.z, 2)
 	_resolve_attack_impact(source, target, move, target_was_guarding, damage, stun_damage, is_player, kind, accent, lunge_start)
 
-func _advance_attack_states() -> void:
+func _advance_attack_states(delta: float) -> void:
 	for fighter in [player_node, enemy_node]:
 		if not is_instance_valid(fighter) or not bool(fighter.get_meta("attack_active", false)):
 			continue
 		var state: Dictionary = fighter.get_meta("attack_state", {})
 		if state.is_empty():
 			continue
+		# Attack lifetime must outlast animation transitions. Einstein and some other idle
+		# clips loop; reading their playhead after the strike clip ends reset progress to 0
+		# and left attack_active set forever. Track combat time independently instead.
+		state["elapsed"] = float(state.get("elapsed", 0.0)) + delta
+		fighter.set_meta("attack_state", state)
 		var frame_data: Dictionary = state.frame_data
 		var frame := _attack_progress_frames(fighter, state)
 		var impact_frame := float(frame_data.startup_frames)
@@ -4666,20 +5906,10 @@ func _advance_attack_states() -> void:
 				if not queued_move.is_empty():
 					call_deferred("_start_buffered_player_move", queued_move)
 
-## Current position inside the attack, in game frames (60 fps).
-## Prefer anim_elapsed (always advances with _process). If the AnimationPlayer playhead is ahead,
-## use that so hitboxes stay visual-synced — but never let a stuck playhead block impact.
+## Current position inside the attack, in game frames (60 fps). This uses the combat
+## clock stored by _advance_attack_states, so an idle animation cannot reset an attack.
 func _attack_progress_frames(fighter: Node3D, state: Dictionary) -> float:
-	var frame_data: Dictionary = state.get("frame_data", {})
-	var total := float(frame_data.get("total_frames", 1))
-	var elapsed_frames := float(fighter.get_meta("anim_elapsed", 0.0)) * 60.0
-	var animation_player := fighter.get_node_or_null("AnimationPlayer") as AnimationPlayer
-	var clip_name := str(state.get("clip", ""))
-	if is_instance_valid(animation_player) and not clip_name.is_empty() \
-			and animation_player.current_animation == clip_name and animation_player.current_animation_length > 0.0:
-		var ap_frames := animation_player.current_animation_position / animation_player.current_animation_length * total
-		return maxf(elapsed_frames, ap_frames)
-	return elapsed_frames
+	return float(state.get("elapsed", 0.0)) * 60.0
 
 ## 1 light punch, 2 kick, 3 launcher / heavy, 4 special or ultimate.
 func _move_cancel_rank(move: Dictionary) -> int:
@@ -4728,7 +5958,11 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 	var hit_damage_mult := float(attack_state.get("hit_damage_mult", 1.0))
 	if bool(move.get("projectile", false)) and not bool(attack_state.get("projectile_hit", false)):
 		return
-	if not bool(move.get("projectile", false)) and not hitbox_hit and not _has_attack_contact(source, target, move, ATTACK_CONTACT_DISTANCE + 0.08):
+	# Validate the impact against the same move-specific reach used when the move
+	# started. Fighters can be separated slightly by their collision capsules
+	# during the lunge, so the old fixed 1.23m check caused valid attacks to whiff.
+	if not bool(move.get("projectile", false)) and not hitbox_hit and not _has_attack_contact(source, target, move, _attack_contact_range(move) + 0.08):
+		GameplayLog.record("attack_whiff", {"actor": "player" if is_player else "opponent", "move": str(move.get("name", "Attack"))})
 		source.set_meta("attack_active", false)
 		source.set_meta("attack_state", {})
 		var retreat := create_tween()
@@ -4736,6 +5970,7 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 		if is_player and is_instance_valid(combo_lab):
 			combo_lab.call("record_missed_move")
 		_show_feedback("WHIFF · THE ATTACK DID NOT CONNECT")
+		_show_move_cue(source, "WHIFF", Color("#ff7777"))
 		return
 	source.set_meta("attack_connected", true)
 	if is_player:
@@ -4770,6 +6005,29 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 	if current_target_guard > 0.0 and not target_was_guarding and attacker_character_index != 11:
 		damage = maxf(1.0, damage - current_target_guard)
 		target_was_guarding = true
+	# ── Guard damage when blocking ──
+	var guard_damage_target := is_player and "enemy" or "player"
+	if target_was_guarding:
+		if is_player:
+			enemy_guard_damage = minf(GUARD_MAX, enemy_guard_damage + GUARD_DAMAGE_PER_HIT)
+			if enemy_guard_damage >= GUARD_MAX and not enemy_guard_crushed:
+				enemy_guard_crushed = true
+				enemy_guard_crush_timer = GUARD_CRUSH_RECOVERY
+				enemy_stun_lock = maxf(enemy_stun_lock, GUARD_CRUSH_STUN)
+				enemy_guard = 0.0
+				_show_feedback("ENEMY GUARD CRUSHED · STUNNED")
+				_screen_freeze(HIT_FREEZE_DURATION * 1.5)
+		else:
+			player_guard_damage = minf(GUARD_MAX, player_guard_damage + GUARD_DAMAGE_PER_HIT)
+			if player_guard_damage >= GUARD_MAX and not player_guard_crushed:
+				player_guard_crushed = true
+				player_guard_crush_timer = GUARD_CRUSH_RECOVERY
+				player_stun_lock = maxf(player_stun_lock, GUARD_CRUSH_STUN)
+				player_guard = 0.0
+				player_is_blocking = false
+				_show_feedback("YOUR GUARD CRUSHED · STUNNED")
+				_screen_freeze(HIT_FREEZE_DURATION * 1.5)
+		_screen_freeze(HIT_FREEZE_DURATION * 0.5)
 
 	var attacker_style := player_style if is_player else opponent_style
 	var defender_style := opponent_style if is_player else player_style
@@ -4846,6 +6104,10 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 			damage = combo_tracker.add_hit(int(damage))
 		
 		_update_combo_ui(combo_count, true)
+		if is_instance_valid(combo_counter_hud) and combo_count >= 2:
+			combo_counter_hud.show_combo(combo_count, true)
+		if not target_was_guarding:
+			_screen_freeze(HIT_FREEZE_DURATION * 0.7)
 		if enemy_stun <= 0.0 and enemy_stun_lock <= 0.0:
 			enemy_stun_lock = 3.0
 			enemy_recovery = maxf(enemy_recovery, 3.0)
@@ -4869,14 +6131,35 @@ func _resolve_attack_impact(source: Node3D, target: Node3D, move: Dictionary, ta
 			damage = combo_tracker.add_hit(int(damage))
 		
 		_update_combo_ui(combo_count, false)
+		if is_instance_valid(combo_counter_hud) and combo_count >= 2:
+			combo_counter_hud.show_combo(combo_count, false)
+		if not target_was_guarding:
+			_screen_freeze(HIT_FREEZE_DURATION * 0.7)
 		if player_stun <= 0.0 and player_stun_lock <= 0.0:
 			player_stun_lock = 3.0
 			player_recovery = maxf(player_recovery, 3.0)
 			_show_feedback("STUN BREAK · 3 SECONDS TO RECOVER")
+	GameplayLog.record("attack_impact", {
+		"actor": "player" if is_player else "opponent",
+		"target": "opponent" if is_player else "player",
+		"move": str(move.get("name", "Attack")),
+		"result": "blocked" if target_was_guarding else "hit",
+		"damage": roundi(damage),
+		"target_hp": roundi(enemy_hp if is_player else player_hp),
+		"counter": is_counter_hit,
+	})
+	if training_mode and is_player:
+		var timing: Dictionary = attack_state.get("frame_data", {})
+		if not timing.is_empty():
+			var attacker_remaining := maxf(0.0, float(timing.get("total_frames", 0.0)) - _attack_progress_frames(source, attack_state))
+			training_last_result = "BLOCK" if target_was_guarding else "HIT"
+			training_last_advantage_frames = roundi(enemy_recovery * 60.0 - attacker_remaining)
 	_activate_hitboxes(source, "all", false)
 	_update_hp_bars()
 	# _show_move_cue(target, str(move.get("cue", move.get("name", "HIT"))), accent)
-	_show_feedback("%s · %d DAMAGE" % [move.get("name", "HIT"), int(damage)])
+	var outcome := "BLOCKED" if target_was_guarding else "HIT"
+	_show_feedback("%s · %d DAMAGE" % [outcome, int(damage)])
+	_show_move_cue(target, "%s · %d" % [outcome, int(damage)], Color("#ffd166") if target_was_guarding else Color("#ffffff"))
 	var away := target.global_position - source.global_position
 	away.y = 0.0
 	if away.length_squared() < 0.0001:
@@ -5033,6 +6316,98 @@ func _use_equipped_ultimate() -> void:
 		return
 	_use_move(selected)
 
+func _on_ultimate_button_pressed() -> void:
+	if is_instance_valid(player_node) and str(player_node.get_meta("character_archetype", "")) == "einstein":
+		return # Albert's hold/release flow is handled by button_down/button_up.
+	_use_equipped_ultimate()
+
+func _on_ultimate_button_down() -> void:
+	if not is_instance_valid(player_node) or str(player_node.get_meta("character_archetype", "")) != "einstein":
+		return
+	var abilities := player_node.get_node_or_null("EinsteinAbilityController")
+	if not is_instance_valid(abilities):
+		return
+	if not bool(abilities.call("begin_ultimate_charge")):
+		if float(abilities.get("cooldown_remaining")) > 0.0:
+			_show_feedback("BIG BANG COOLING DOWN")
+		else:
+			_show_feedback("BIG BANG NEEDS 100% GRAVITY · LAND HITS")
+		return
+	_play_fighter_action(player_node, "charge", 999.0)
+	_set_gravity_charge_aura(true)
+	_show_feedback("BIG BANG CHARGED · RELEASE TO COLLAPSE")
+
+func _on_ultimate_button_up() -> void:
+	if is_instance_valid(player_node):
+		_release_einstein_ultimate()
+
+func _release_einstein_ultimate() -> void:
+	if not is_instance_valid(player_node) or str(player_node.get_meta("character_archetype", "")) != "einstein":
+		return
+	var abilities := player_node.get_node_or_null("EinsteinAbilityController")
+	if not is_instance_valid(abilities) or not bool(abilities.call("release_ultimate")):
+		return
+	_set_gravity_charge_aura(false)
+	var move := {
+		"name": "Big Bang · Black Hole",
+		"kind": "ultimate",
+		"damage": 72.0,
+		"stun": 55.0,
+		"cost": 0,
+		"animation": "einstein_wave",
+		"projectile": true,
+		"projectile_range": 12.0,
+		"ultimate_type": "void_vortex",
+		"signature": true,
+		"cue": "BIG BANG"
+	}
+	_apply_move(true, move, player_node.global_position.distance_to(enemy_node.global_position))
+	_play_sfx("attack_swing", -3.0, 0.0)
+
+func _on_einstein_gravity_updated(value: float, maximum: float) -> void:
+	if is_instance_valid(player_gravity_bar):
+		player_gravity_bar.max_value = maximum
+		player_gravity_bar.value = value
+	_update_hud()
+
+func _on_einstein_cooldown_updated(remaining: float, duration: float) -> void:
+	if not is_instance_valid(ultimate_cooldown_ring):
+		return
+	ultimate_cooldown_ring.max_value = maxf(duration, 0.01)
+	ultimate_cooldown_ring.value = remaining
+	ultimate_cooldown_ring.visible = remaining > 0.0
+	_update_hud()
+
+func _set_gravity_charge_aura(enabled: bool) -> void:
+	if not is_instance_valid(player_node):
+		return
+	var old_aura := player_node.get_node_or_null("GravityChargeAura")
+	if not enabled:
+		if is_instance_valid(old_aura):
+			old_aura.queue_free()
+		return
+	if is_instance_valid(old_aura):
+		return
+	var aura := Node3D.new()
+	aura.name = "GravityChargeAura"
+	player_node.add_child(aura)
+	for index in range(3):
+		var ring := MeshInstance3D.new()
+		var ring_mesh := _fx_torus()
+		ring_mesh.inner_radius = 0.48 + index * 0.12
+		ring_mesh.outer_radius = 0.52 + index * 0.12
+		ring.mesh = ring_mesh
+		ring.position.y = 0.45 + index * 0.38
+		var glow := _make_material(Color("#42ddff"), 0.25)
+		glow.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		glow.albedo_color = Color(0.25, 0.85, 1.0, 0.72)
+		glow.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		glow.emission_enabled = true
+		glow.emission = Color("#30cfff")
+		glow.emission_energy_multiplier = 2.5
+		ring.material_override = glow
+		aura.add_child(ring)
+
 func _use_move(move: Dictionary) -> void:
 	if match_over or challenge_active:
 		return
@@ -5152,6 +6527,7 @@ func _on_jump() -> void:
 		_show_feedback("ALREADY AIRBORNE")
 		return
 	_show_feedback("JUMP · LEAP")
+	GameplayLog.record("jump", {"position": str(player_node.position)})
 	var jump_direction := Vector3(joystick_vector.x, 0.0, joystick_vector.y)
 	if jump_direction.length_squared() < 0.01:
 		jump_direction = enemy_node.position - player_node.position
@@ -5167,6 +6543,47 @@ func _on_jump() -> void:
 	_play_fighter_action(player_node, "jump", JUMP_DURATION)
 	# _show_move_cue(player_node, "JUMP", GameData.CHARACTERS[player_character_index].accent)
 
+func _try_perfect_parry() -> bool:
+	if not is_instance_valid(enemy_node) or not bool(enemy_node.get_meta("attack_active", false)):
+		return false
+	var state: Dictionary = enemy_node.get_meta("attack_state", {})
+	if state.is_empty() or state.get("target") != player_node:
+		return false
+	var frame_data: Dictionary = state.get("frame_data", {})
+	if frame_data.is_empty():
+		return false
+	var move: Dictionary = state.get("move", {})
+	var parry_frame := float(frame_data.get("startup_frames", 0.0))
+	if bool(move.get("projectile", false)):
+		parry_frame = float(frame_data.get("fire_frame", parry_frame))
+	var attack_frame := _attack_progress_frames(enemy_node, state)
+	var parry_window_start := maxf(1.0, parry_frame - PERFECT_PARRY_WINDOW_FRAMES)
+	if attack_frame < parry_window_start or attack_frame >= parry_frame:
+		return false
+	if not bool(move.get("projectile", false)) and not _has_attack_contact(enemy_node, player_node, move, _attack_contact_range(move) + 0.12):
+		return false
+
+	# A precise block cancels the incoming strike and briefly staggers the attacker.
+	# A late or early press simply falls through to the regular guard below.
+	_activate_hitboxes(enemy_node, "all", false)
+	enemy_node.set_meta("attack_active", false)
+	enemy_node.set_meta("attack_state", {})
+	enemy_node.remove_meta("pending_attack_move")
+	enemy_stun_lock = maxf(enemy_stun_lock, 0.75)
+	enemy_recovery = maxf(enemy_recovery, 0.75)
+	player_mp = minf(MAX_MP, player_mp + 1.0)
+	player_is_blocking = false
+	player_guard = 0.0
+	_play_fighter_action(player_node, "block", 0.32)
+	_play_fighter_action(enemy_node, "hit_react", 0.55)
+	_play_sfx("hit_medium", -5.0, 0.12)
+	if hit_stop_controller:
+		hit_stop_controller.apply_hit_stop(0.06)
+	_screen_freeze(HIT_FREEZE_DURATION * 1.25)
+	_update_hud()
+	_show_feedback("PERFECT PARRY · ENEMY STAGGERED · +1 MP")
+	return true
+
 func _on_block() -> void:
 	if challenge_active or match_over or player_stun_lock > 0.0:
 		return
@@ -5179,13 +6596,18 @@ func _on_block() -> void:
 	if is_charging:
 		_show_feedback("STOP CHARGING BEFORE BLOCKING")
 		return
+	if _try_perfect_parry():
+		return
 	player_is_blocking = true
+	GameplayLog.record("block_start", {})
 	player_guard = 12.0 + (6.0 if player_character_index == 8 else 0.0)
 	_play_fighter_action(player_node, "block", 999.0)
 	_show_feedback("BLOCKING · RELEASE TO LOWER GUARD")
 	# _show_move_cue(player_node, "BLOCK", GameData.CHARACTERS[player_character_index].accent)
 
 func _on_block_released() -> void:
+	if player_is_blocking:
+		GameplayLog.record("block_end", {})
 	player_is_blocking = false
 	if is_instance_valid(player_node) and player_guard > 0.0:
 		player_guard = 0.0
@@ -5203,6 +6625,8 @@ func _set_charging(value: bool) -> void:
 	if combat and combat.has_method("can_act"):
 		can_charge = can_charge and bool(combat.call("can_act"))
 	is_charging = value and can_charge
+	if is_charging != value:
+		GameplayLog.record("charge_toggle", {"enabled": is_charging})
 	if combat and combat.has_method("set_charging"):
 		combat.call("set_charging", is_charging)
 	if is_charging:
@@ -5255,41 +6679,27 @@ func _set_charge_aura(enabled: bool) -> void:
 
 func _on_joystick_changed(value: Vector2) -> void:
 	joystick_vector = value
+	var sector := Vector2i(roundi(value.x * 2.0), roundi(value.y * 2.0))
+	if sector != _logged_stick_sector:
+		_logged_stick_sector = sector
+		GameplayLog.record("movement_input", {"x": snappedf(value.x, 0.01), "y": snappedf(value.y, 0.01)})
 
 func _update_camera(delta: float) -> void:
 	if not is_instance_valid(camera) or not is_instance_valid(player_node) or not is_instance_valid(enemy_node):
 		return
-	var center := (player_node.position + enemy_node.position) * 0.5
-	var fighter_span := Vector2(player_node.position.x - enemy_node.position.x, player_node.position.z - enemy_node.position.z).length()
-	var vertical_span := absf(player_node.position.y - enemy_node.position.y)
-	var camera_back := clampf(7.4 + fighter_span * 0.38 + vertical_span * 0.3, 7.4, 13.5)
-	var camera_height := clampf(3.8 + fighter_span * 0.17 + vertical_span * 0.12, 3.8, 7.0)
-	var desired_position := center + Vector3(0.0, camera_height, camera_back)
-	camera_shake_phase += delta * 52.0
-	camera_shake_strength = move_toward(camera_shake_strength, 0.0, delta * 1.8)
-
 	# Animate water shader time
 	if water_shader_material:
 		water_shader_material.set_shader_parameter("time", Time.get_ticks_msec() / 1000.0)
-
-	var shake := Vector3(
-		sin(camera_shake_phase * 1.0) * camera_shake_strength,
-		sin(camera_shake_phase * 1.7) * camera_shake_strength * 0.35,
-		sin(camera_shake_phase * 1.3) * camera_shake_strength * 0.2
-	)
-
-	# Dynamic FOV expansion during dash / high speed
-	var speed_factor := player_ground_velocity.length() / maxf(PLAYER_SPEED, 0.001)
-	if player_is_dashing:
-		speed_factor = maxf(speed_factor, 1.5)
-	camera_fov_target = lerp(45.0, 70.0, clampf(speed_factor * 0.4, 0.0, 1.0))
-	camera_fov_current = lerp(camera_fov_current, camera_fov_target, delta * 8.0)
-	camera_punch = move_toward(camera_punch, 0.0, delta * 4.0)
-	camera.fov = camera_fov_current - camera_punch * 30.0
-
-	var blend := 1.0 - exp(-delta * 5.0)
-	camera.position = camera.position.lerp(desired_position + shake, blend)
-	camera.look_at(center + Vector3(0.0, 0.8, 0.0), Vector3.UP)
+	if is_instance_valid(battle_camera_controller):
+		battle_camera_controller.set_targets(player_node, enemy_node)
+		var fighter_span := player_node.global_position.distance_to(enemy_node.global_position)
+		var melee_active: bool = fighter_span <= 3.2 and (player_recovery > 0.0 or enemy_recovery > 0.0)
+		battle_camera_controller.set_melee_profile(melee_active)
+		battle_camera_controller.set_impact_shake(camera_shake_strength, 3.5)
+		battle_camera_controller.punch_fov(camera_punch)
+		battle_camera_controller.update_camera(delta, player_ground_velocity.length(), player_is_dashing)
+		camera_shake_strength = move_toward(camera_shake_strength, 0.0, delta * 1.8)
+		camera_punch = move_toward(camera_punch, 0.0, delta * 4.0)
 
 func _update_hud() -> void:
 	if not is_instance_valid(hud):
@@ -5310,7 +6720,7 @@ func _update_hud() -> void:
 		enemy_title_label.text = "%s  ·  %s" % [enemy_title, "TRAINING" if training_mode else "%s · %s" % [opponent_style, ai_difficulty.to_upper()]]
 	var info := hud.get_node_or_null("ModeInfo/ProgressInfo") as Label
 	if info:
-		info.text = "%s  ·  LV %d  ·  %d XP  ·  %s  ·  W %d" % [player_style, player_level, player_xp, GameData.RANKS[rank_index], wins]
+		info.text = "%dXP · %s · W%d" % [player_xp, GameData.RANKS[rank_index], wins]
 	if is_instance_valid(clash_button):
 		clash_button.visible = not training_mode
 		clash_button.disabled = training_mode or player_mp > MAX_MP * 0.2 or mp_clash_cooldown > 0.0 or match_over
@@ -5330,6 +6740,7 @@ func _update_hud() -> void:
 	if is_instance_valid(story_button):
 		story_button.text = "STORY · %d/%d" % [min(story_progress, StoryCampaignScript.CHAPTERS.size()), StoryCampaignScript.CHAPTERS.size()]
 		story_button.disabled = story_mode_active
+	_update_training_frame_readout()
 	var mobile_strike := hud.get_node_or_null("CombatActions/MobileStrikeButton") as Button
 	if is_instance_valid(mobile_strike):
 		mobile_strike.text = "STRIKE · %s" % mobile_next_strike.to_upper()
@@ -5339,6 +6750,81 @@ func _update_hud() -> void:
 	var kick_button := hud.get_node_or_null("CombatActions/KickThrowButton") as Button
 	if is_instance_valid(kick_button):
 		kick_button.text = "THROW" if grapple_holder == player_node else "BREAK FREE" if grapple_victim == player_node else "JUMP KICK" if bool(player_node.get_meta("airborne", false)) else "KICK"
+	# ── Tag-team / art style HUD ──
+	if is_instance_valid(tag_button):
+		tag_button.disabled = tag_cooldown > 0.0 or tag_swap_lock > 0.0 or not tag_partner_active
+		if tag_cooldown > 0.0:
+			tag_button.text = "TAG · %.0fs" % tag_cooldown
+		elif tag_swap_lock > 0.0:
+			tag_button.text = "TAG · LOCKED"
+		else:
+			tag_button.text = "TAG · PARTNER"
+	if is_instance_valid(art_style_button):
+		var style_name: String = ["SMOOTH", "VOXEL", "PIXEL"][art_style]
+		art_style_button.text = "STYLE · %s" % style_name
+	if is_instance_valid(isometric_button):
+		isometric_button.text = "CAMERA · %s" % ("ISO" if isometric_mode else "PERSP")
+	if is_instance_valid(map_editor_button):
+		map_editor_button.text = "EDITOR · %s" % ("ON" if map_editor_active else "OFF")
+	if is_instance_valid(elo_button):
+		elo_button.text = "ELO · %d" % player_elo
+	if is_instance_valid(elo_display_label):
+		var div_index := _elo_division_for_rating(player_elo)
+		elo_display_label.text = "Division: %s" % elo_divisions[div_index]
+	# ── Guard crush / P2 / coach HUD ──
+	if player_guard_crushed:
+		var feedback := hud.get_node_or_null("FeedbackLabel") as Label
+		if is_instance_valid(feedback_label):
+			feedback_label.text = "GUARD CRUSHED · STUNNED"
+	if enemy_guard_crushed and is_instance_valid(feedback_label):
+		if feedback_label.text.is_empty() or feedback_label.text == "GUARD CRUSHED · STUNNED":
+			feedback_label.text = "ENEMY GUARD CRUSHED · STUNNED"
+	if coach_hint_timer > 0.0 and not challenge_active:
+		if is_instance_valid(feedback_label) and not coach_hint_text.is_empty():
+			var existing := feedback_label.text
+			if not existing.contains("COACH:"):
+				feedback_label.text = "COACH: %s" % coach_hint_text
+
+func _update_training_frame_readout() -> void:
+	if not is_instance_valid(training_frame_label):
+		return
+	var panel := training_frame_label.get_parent() as Control
+	if is_instance_valid(panel):
+		panel.visible = training_mode and not challenge_active
+	if not training_mode:
+		return
+	var name := training_last_move_name if not training_last_move_name.is_empty() else "YOUR NEXT ATTACK"
+	var frame_data := training_last_frame_data
+	var result_text := ""
+	if is_instance_valid(player_node) and bool(player_node.get_meta("attack_active", false)):
+		var state: Dictionary = player_node.get_meta("attack_state", {})
+		var current_data: Dictionary = state.get("frame_data", {})
+		if not current_data.is_empty():
+			frame_data = current_data
+			var frame := _attack_progress_frames(player_node, state)
+			var startup := float(frame_data.get("startup_frames", 0.0))
+			var active_end := startup + float(frame_data.get("active_frames", 0.0))
+			if frame < startup:
+				result_text = "STARTUP %d/%df" % [mini(floori(frame) + 1, ceili(startup)), ceili(startup)]
+			elif frame < active_end:
+				result_text = "ACTIVE %d/%df" % [mini(floori(frame - startup) + 1, ceili(active_end - startup)), ceili(active_end - startup)]
+			else:
+				result_text = "RECOVERY %d/%df" % [mini(floori(frame - active_end) + 1, ceili(float(frame_data.get("recovery_frames", 0.0)))), ceili(float(frame_data.get("recovery_frames", 0.0)))]
+	if frame_data.is_empty():
+		training_frame_label.text = "FRAME DATA · ATTACK TO SEE STARTUP / ACTIVE / RECOVERY"
+		return
+	if result_text.is_empty():
+		result_text = training_last_result
+		if not result_text.is_empty():
+			result_text += " %s%df" % ["+" if training_last_advantage_frames >= 0 else "", training_last_advantage_frames]
+		else:
+			result_text = "READY"
+	training_frame_label.text = "%s  ·  %s  ·  START %df  ACTIVE %df  RECOVERY %df" % [
+		name.to_upper(), result_text,
+		ceili(float(frame_data.get("startup_frames", 0.0))),
+		ceili(float(frame_data.get("active_frames", 0.0))),
+		ceili(float(frame_data.get("recovery_frames", 0.0)))
+	]
 
 func _update_hp_bars() -> void:
 	_sync_fighter_health(player_node, player_hp)
@@ -5404,6 +6890,7 @@ func _close_games_hub() -> void:
 		main_menu_open = false
 
 func _show_feedback(text: String) -> void:
+	GameplayLog.record("feedback", {"text": text})
 	if is_instance_valid(feedback_label):
 		feedback_label.text = text
 
@@ -5624,6 +7111,10 @@ func _resolve_clash(player_won: bool) -> void:
 func _toggle_training() -> void:
 	training_mode = not training_mode
 	if training_mode:
+		training_last_move_name = ""
+		training_last_frame_data.clear()
+		training_last_result = ""
+		training_last_advantage_frames = 0
 		enemy_is_training = true
 		opponent_style = player_style
 		opponent_character_index = 2
@@ -5706,6 +7197,7 @@ func _leave_training_challenge() -> void:
 	_clear_challenge_overlay()
 
 func _end_match(player_won: bool) -> void:
+	GameplayLog.record("match_end", {"winner": "player" if player_won else "opponent", "player_hp": roundi(player_hp), "opponent_hp": roundi(enemy_hp)})
 	match_over = true
 	Engine.time_scale = 1.0
 	is_charging = false
@@ -6047,6 +7539,35 @@ func _load_loadouts() -> void:
 		return
 	loadout_profiles = loaded.profiles
 
+func _load_custom_moves() -> void:
+	var path := "res://data/custom_moves.json"
+	if not FileAccess.file_exists(path):
+		push_error("Custom move definitions not found: %s" % path)
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		push_error("Unable to open custom moves file: %s" % path)
+		return
+	var json := JSON.new()
+	var parse_error := json.parse(file.get_as_text())
+	file.close()
+	if parse_error != OK:
+		push_error("Invalid custom moves JSON at line %d: %s" % [json.get_error_line(), json.get_error_message()])
+		return
+	var data: Variant = json.data
+	if data is Dictionary:
+		var custom_moves: Array = []
+		if data.has("moves"):
+			custom_moves = data.moves
+		if custom_moves is Array:
+			_custom_moves_database = custom_moves
+		var styles: Dictionary = {}
+		if data.has("styles"):
+			styles = data.styles
+		if styles is Dictionary:
+			_custom_styles_database = styles
+		_show_feedback("CUSTOM MOVES LOADED · %d moves · %d styles" % [custom_moves.size(), styles.size()])
+
 func _read_loadouts_file(path: String) -> Dictionary:
 	if not FileAccess.file_exists(path):
 		return {"ok": true, "profiles": [] as Array[Dictionary], "error": ""}
@@ -6125,6 +7646,7 @@ func _save_progress() -> void:
 	config.set_value("player", "wins", wins)
 	config.set_value("player", "rank", rank_index)
 	config.set_value("player", "character", player_character_index)
+	config.set_value("player", "character_selection_version", 1)
 	config.set_value("player", "style", player_style)
 	config.set_value("player", "story_progress", story_progress)
 	var error := config.save("user://progress.cfg")
@@ -6168,7 +7690,14 @@ func _load_progress() -> void:
 	player_xp = int(config.get_value("player", "xp", 0))
 	wins = int(config.get_value("player", "wins", 0))
 	rank_index = clampi(int(config.get_value("player", "rank", 0)), 0, GameData.RANKS.size() - 1)
-	player_character_index = clampi(int(config.get_value("player", "character", 0)), 0, GameData.CHARACTERS.size() - 1)
+	# Put the newly added Blender character in the first-run slot. Older saves did
+	# not record this version and defaulted to the stickman roster, so migrate
+	# those once while keeping any explicit selection made from the new roster.
+	var character_selection_version := int(config.get_value("player", "character_selection_version", 0))
+	if character_selection_version < 1:
+		player_character_index = GameData.CHARACTERS.size() - 1
+	else:
+		player_character_index = clampi(int(config.get_value("player", "character", GameData.CHARACTERS.size() - 1)), 0, GameData.CHARACTERS.size() - 1)
 	player_style = str(config.get_value("player", "style", "Chess"))
 	story_progress = clampi(int(config.get_value("player", "story_progress", 0)), 0, StoryCampaignScript.CHAPTERS.size())
 	opponent_character_index = 1 if player_character_index != 1 else 0
@@ -6178,12 +7707,24 @@ func _load_progress() -> void:
 	opponent_data = GameData.CHARACTERS[opponent_character_index]
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F3 and OS.is_debug_build():
+		_toggle_developer_log()
+		get_viewport().set_input_as_handled()
+		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		if pause_menu_open:
 			_close_pause_menu()
 		elif not main_menu_open and not challenge_active:
 			_open_pause_menu()
 		return
+	if not main_menu_open and not pause_menu_open:
+		for action in ["move_left", "move_right", "move_forward", "move_back", "attack_punch", "attack_kick", "attack_uppercut", "attack_grab", "action_sprint", "action_jump", "action_dash", "action_block", "action_charge", "action_fly_toggle", "action_crouch"]:
+			if event.is_action_pressed(action) or event.is_action_released(action):
+				GameplayLog.record("control", {"name": action, "pressed": event.is_action_pressed(action)})
+				break
+		# ── Replay input recording ──
+		if replay_recording and not replay_playback:
+			_replay_record_frame(event)
 	if main_menu_open:
 		return
 	if pause_menu_open:
@@ -6210,3 +7751,121 @@ func _input(event: InputEvent) -> void:
 		_set_charging(true)
 	elif event.is_action_released("action_charge"):
 		_set_charging(false)
+	# ── Local multiplayer P2 keyboard controls ──
+	if player2_active and is_instance_valid(enemy_node) and not match_over and not challenge_active:
+		if event.is_action_pressed("p2_up") or event.is_action_pressed("p2_down") or event.is_action_pressed("p2_left") or event.is_action_pressed("p2_right"):
+			var px := 0.0
+			var py := 0.0
+			if event.is_action_pressed("p2_left"): px -= 1.0
+			if event.is_action_pressed("p2_right"): px += 1.0
+			if event.is_action_pressed("p2_up"): py += 1.0
+			if event.is_action_pressed("p2_down"): py -= 1.0
+			player2_joystick_vector = Vector2(px, py).normalized()
+		if event.is_action_just_pressed("p2_attack"):
+			_on_enemy_attack("punch")
+		elif event.is_action_just_pressed("p2_kick"):
+			_on_enemy_attack("kick")
+		elif event.is_action_just_pressed("p2_jump"):
+			_on_enemy_jump()
+		elif event.is_action_just_pressed("p2_block"):
+			_on_enemy_block()
+		elif event.is_action_just_pressed("p2_dash"):
+			var dir := Vector3(player2_joystick_vector.x, 0.0, player2_joystick_vector.y)
+			if dir.length_squared() < 0.01:
+				dir = (player_node.global_position - enemy_node.global_position)
+				dir.y = 0.0
+				dir = dir.normalized()
+			_perform_enemy_dash(dir)
+	# ── Tag-team swap ──
+	if tag_partner_active and event.is_action_just_pressed("action_tag") and not match_over and not challenge_active:
+		_swap_tag_partner()
+	# ── Camera toggle ──
+	if event.is_action_just_pressed("action_camera_toggle") and not main_menu_open and not pause_menu_open:
+		_toggle_isometric_camera()
+	# ── Map editor ──
+	if map_editor_active:
+		if event.is_action_just_pressed("action_editor_place"):
+			_place_arena_piece()
+		elif event.is_action_just_pressed("action_editor_remove"):
+			_remove_arena_piece()
+
+# ── Replay system ──
+func _replay_record_frame(event: InputEvent) -> void:
+	var record := {
+		"frame": replay_frame,
+		"time": Time.get_ticks_msec(),
+		"joystick_x": joystick_vector.x,
+		"joystick_y": joystick_vector.y,
+		"punch": event.is_action_pressed("attack_punch") if event is InputEventKey else false,
+		"kick": event.is_action_pressed("attack_kick") if event is InputEventKey else false,
+		"uppercut": event.is_action_pressed("attack_uppercut") if event is InputEventKey else false,
+		"grab": event.is_action_pressed("attack_grab") if event is InputEventKey else false,
+		"jump": event.is_action_pressed("action_jump") if event is InputEventKey else false,
+		"dash": event.is_action_pressed("action_dash") if event is InputEventKey else false,
+		"block": event.is_action_pressed("action_block") if event is InputEventKey else false,
+		"charge": event.is_action_pressed("action_charge") if event is InputEventKey else false,
+	}
+	replay_inputs.append(record)
+	replay_frame += 1
+
+func replay_save(name: String) -> void:
+	if replay_inputs.is_empty():
+		_show_feedback("NO REPLAY DATA TO SAVE")
+		return
+	var file := FileAccess.open("user://replay_%s.json" % name, FileAccess.WRITE)
+	if file == null:
+		_show_feedback("REPLAY SAVE FAILED")
+		return
+	file.store_string(JSON.stringify({"version": 1, "inputs": replay_inputs}, "\t"))
+	file.close()
+	_show_feedback("REPLAY SAVED: %s" % name)
+
+func replay_load(name: String) -> void:
+	var path := "user://replay_%s.json" % name
+	if not FileAccess.file_exists(path):
+		_show_feedback("REPLAY NOT FOUND: %s" % name)
+		return
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		_show_feedback("REPLAY LOAD FAILED")
+		return
+	var json := JSON.new()
+	var err := json.parse(file.get_as_text())
+	file.close()
+	if err != OK:
+		_show_feedback("REPLAY INVALID JSON")
+		return
+	var data: Variant = json.data
+	if data is Dictionary and data.has("inputs"):
+		replay_inputs = data.inputs
+		replay_playback = true
+		replay_input_index = 0
+		replay_frame = 0
+		_show_feedback("REPLAY LOADED: %d frames" % replay_inputs.size())
+	else:
+		_show_feedback("REPLAY INVALID FORMAT")
+
+func _replay_apply_input() -> void:
+	if not replay_playback or replay_input_index >= replay_inputs.size():
+		replay_playback = false
+		return
+	var record := replay_inputs[replay_input_index]
+	joystick_vector = Vector2(record.get("joystick_x", 0.0), record.get("joystick_y", 0.0))
+	# Apply recorded inputs as actions (simplified: direct calls)
+	if record.get("jump", false):
+		_on_jump()
+	if record.get("dash", false):
+		if not player_is_dashing:
+			var dash_dir := Vector3(joystick_vector.x, 0.0, joystick_vector.y)
+			if dash_dir.length_squared() < 0.01:
+				dash_dir = -player_node.global_basis.z
+			_perform_dash(dash_dir)
+	if record.get("punch", false):
+		_on_basic_attack("punch")
+	elif record.get("kick", false):
+		_on_basic_attack("kick")
+	elif record.get("uppercut", false):
+		_on_basic_attack("uppercut")
+	elif record.get("grab", false):
+		_on_basic_attack("grab")
+	replay_input_index += 1
