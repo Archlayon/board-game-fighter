@@ -13,6 +13,7 @@ config/features=PackedStringArray("4.7")
 [autoload]
 
 GameAudio="*res://scripts/game_audio.gd"
+GameplayLog="*res://scripts/gameplay_logger.gd"
 SyncManager="*uid://ciu812uibjjdn"
 
 [display]
